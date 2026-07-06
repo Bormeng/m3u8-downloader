@@ -491,10 +491,62 @@ final class DownloaderViewModel: ObservableObject {
     // MARK: - Logging
 
     private func appendLog(_ text: String, isErr: Bool = false) {
+        if Self.shouldFilter(text) { return }
         // strip ANSI escape codes for readability
         let clean = Self.strippingAnsi(text)
         logs.append(.init(time: Date(), text: clean))
         if logs.count > 5000 { logs.removeFirst(logs.count - 5000) }
+    }
+
+    /// Drop lines that don't carry actionable info — ffmpeg startup banner,
+    /// stream / input / output / mapping descriptions, per-segment "Opening
+    /// 'xxx.ts' for reading" chatter, and N_m3u8DL-RE's empty status lines
+    /// (just "INFO :" with no body, or stderr timestamps with no payload).
+    /// Errors, progress frames, our explicit ✓/✗ summary lines, and ffmpeg's
+    /// final mux summary (`video:...kB audio:...kB`) are all kept.
+    private static func shouldFilter(_ line: String) -> Bool {
+        let head = line.trimmingCharacters(in: .whitespaces)
+        if head.isEmpty { return true }
+
+        // N_m3u8DL-RE bare stderr timestamps: "10:46:21.700"
+        if head.range(of: #"^\d{2}:\d{2}:\d{2}\.\d{3}\s*$"#,
+                      options: .regularExpression) != nil {
+            return true
+        }
+        // N_m3u8DL-RE empty bracketed lines: "INFO :", "WARN :", etc.
+        if head.range(of: #"^(INFO|WARN|STATUS|ERROR|DEBUG|TIP)\s*:\s*$"#,
+                      options: .regularExpression) != nil {
+            return true
+        }
+
+        // ffmpeg startup banner
+        if head.hasPrefix("ffmpeg version") { return true }
+        if head.range(of: #"^\s+(built with|configuration:|libav)"#,
+                      options: .regularExpression) != nil { return true }
+
+        // ffmpeg stream / input / output / mapping descriptions
+        let ffmpegNoise: [String] = [
+            #"^Input #\d+,"#,
+            #"^\s+Duration:"#,
+            #"^\s+Program \d+"#,
+            #"^\s+Metadata:"#,
+            #"^\s+variant_bitrate"#,
+            #"^\s+Stream #\d+:"#,
+            #"^\s+Stream #\d+: -> #\d+:"#,
+            #"^Stream mapping:"#,
+            #"^Output #\d+,"#,
+            #"^\s+encoder\s+:"#,
+            #"^Press \[q\]"#
+        ]
+        for pat in ffmpegNoise {
+            if head.range(of: pat, options: .regularExpression) != nil { return true }
+        }
+
+        // ffmpeg per-segment HTTP chatter — one line per .ts file opened.
+        if head.range(of: #"^\[(https|hls|http) @ 0x[a-fA-F0-9]+\] Opening"#,
+                      options: .regularExpression) != nil { return true }
+
+        return false
     }
 
     private static func strippingAnsi(_ s: String) -> String {
