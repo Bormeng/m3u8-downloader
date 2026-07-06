@@ -211,11 +211,22 @@ final class DownloaderViewModel: ObservableObject {
                     let elapsed = self.startedAt.map { Date().timeIntervalSince($0) } ?? 0
                     if let err = err {
                         self.status = .failed(err.localizedDescription)
+                        self.notifyDone(success: false)
                     } else if code == 0 {
                         self.status = .success(elapsed)
                         self.notifyDone(success: true)
                     } else if code == 15 || code == 9 {
                         self.status = .cancelled
+                    } else if Self.shouldFallback(code: code, err: err) {
+                        // N_m3u8DL-RE exited abnormally — try ffmpeg as a
+                        // fallback. Status / notification will be set inside.
+                        self.runFFmpegFallback(.init(
+                            url: self.draft.url,
+                            saveDir: self.draft.saveDir,
+                            saveName: self.draft.saveName,
+                            headers: self.draft.headers,
+                            format: self.draft.format
+                        ))
                     } else {
                         self.status = .failed("退出码 \(code)")
                         self.notifyDone(success: false)
@@ -226,6 +237,118 @@ final class DownloaderViewModel: ObservableObject {
 
     func cancel() {
         runner.cancel()
+    }
+
+    // MARK: - ffmpeg fallback
+    //
+    // N_m3u8DL-RE's progress bar uses Spectre.Console, which has a known race
+    // that occasionally throws `List<T>.RemoveRange` out-of-bounds and crashes
+    // the .NET process. When that happens we fall back to `ffmpeg -c copy`,
+    // which doesn't parse playlists intelligently but reliably handles a
+    // single-variant HLS stream and never goes through Spectre.Console.
+
+    private struct FallbackRequest {
+        let url: String
+        let saveDir: String
+        let saveName: String      // may be empty
+        let headers: [String]     // "Referer: xxx" format, as used by N_m3u8DL-RE's -H
+        let format: OutputFormat
+    }
+
+    private static let fileTimestamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+
+    private func runFFmpegFallback(_ req: FallbackRequest) {
+        guard let ffmpeg = Self.ffmpegPath,
+              FileManager.default.isExecutableFile(atPath: ffmpeg) else {
+            appendLog("[fallback] ffmpeg 不可用,跳过 (\(Self.ffmpegPath ?? "未找到"))")
+            status = .failed("N_m3u8DL-RE 失败,且未找到 ffmpeg")
+            notifyDone(success: false)
+            return
+        }
+
+        var args: [String] = []
+        if !req.headers.isEmpty {
+            // ffmpeg's -headers is a single string; each header must end in CRLF.
+            let headerStr = req.headers
+                .map { $0.hasSuffix("\r\n") ? $0 : "\($0)\r\n" }
+                .joined()
+            args += ["-headers", headerStr]
+        }
+        args += ["-y", "-i", req.url]
+        args += ["-c", "copy"]
+
+        let ext: String
+        switch req.format {
+        case .mp4:
+            // h264 in TS segments → MP4 needs annex-B bitstream filter so
+            // the parameter sets land in the moov box.
+            args += ["-bsf:v", "h264_mp4toannexb"]
+            args += ["-f", "mp4"]
+            ext = "mp4"
+        case .mkv:
+            args += ["-f", "matroska"]
+            ext = "mkv"
+        case .ts:
+            args += ["-f", "mpegts"]
+            ext = "ts"
+        }
+
+        // Add _ffmpeg suffix so the file doesn't collide with any partial
+        // output N_m3u8DL-RE may have left behind.
+        let baseName: String = {
+            if req.saveName.isEmpty {
+                return "fallback_\(Self.fileTimestamp.string(from: Date()))"
+            }
+            return "\(req.saveName)_ffmpeg"
+        }()
+        let outFile = "\(req.saveDir)/\(baseName).\(ext)"
+        args += [outFile]
+
+        appendLog("[fallback] N_m3u8DL-RE 失败,改用 ffmpeg")
+        appendLog("$ \(ffmpeg) \(args.joined(separator: " "))")
+
+        runner.launch(
+            executable: ffmpeg,
+            arguments: args,
+            workingDirectory: req.saveDir,
+            environment: Self.inheritedEnvironment,
+            onLine: { [weak self] line, isErr in
+                Task { @MainActor in
+                    self?.appendLog(line, isErr: isErr)
+                }
+            },
+            onExit: { [weak self] code, err in
+                Task { @MainActor in
+                    guard let self else { return }
+                    let elapsed = self.startedAt.map { Date().timeIntervalSince($0) } ?? 0
+                    if let err = err {
+                        self.status = .failed("ffmpeg fallback: \(err.localizedDescription)")
+                        self.notifyDone(success: false)
+                    } else if code == 0 {
+                        self.status = .success(elapsed)
+                        self.notifyDone(success: true)
+                    } else if code == 15 || code == 9 {
+                        self.status = .cancelled
+                    } else {
+                        self.status = .failed("N_m3u8DL-RE 和 ffmpeg fallback 都失败 (ffmpeg 退出码 \(code))")
+                        self.notifyDone(success: false)
+                    }
+                }
+            })
+    }
+
+    /// Returns true when the exit looks like a real failure that should
+    /// trigger the ffmpeg fallback. User-cancel and spawn errors are excluded.
+    private static func shouldFallback(code: Int32, err: Error?) -> Bool {
+        guard err == nil else { return false }
+        if code == 0 { return false }
+        if code == 15 || code == 9 { return false }   // SIGTERM / SIGKILL
+        return true
     }
 
     // MARK: - External handoff (used by BrowserView)
@@ -288,11 +411,22 @@ final class DownloaderViewModel: ObservableObject {
                     let elapsed = self.startedAt.map { Date().timeIntervalSince($0) } ?? 0
                     if let err = err {
                         self.status = .failed(err.localizedDescription)
+                        self.notifyDone(success: false)
                     } else if code == 0 {
                         self.status = .success(elapsed)
                         self.notifyDone(success: true)
                     } else if code == 15 || code == 9 {
                         self.status = .cancelled
+                    } else if Self.shouldFallback(code: code, err: err) {
+                        // N_m3u8DL-RE exited abnormally — try ffmpeg as a
+                        // fallback. Status / notification will be set inside.
+                        self.runFFmpegFallback(.init(
+                            url: u,
+                            saveDir: dir,
+                            saveName: saveName,
+                            headers: extraHeaders.isEmpty ? self.draft.headers : extraHeaders,
+                            format: format
+                        ))
                     } else {
                         self.status = .failed("退出码 \(code)")
                         self.notifyDone(success: false)
