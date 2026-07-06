@@ -220,13 +220,16 @@ final class DownloaderViewModel: ObservableObject {
                     } else if Self.shouldFallback(code: code, err: err) {
                         // N_m3u8DL-RE exited abnormally — try ffmpeg as a
                         // fallback. Status / notification will be set inside.
-                        self.runFFmpegFallback(.init(
-                            url: self.draft.url,
-                            saveDir: self.draft.saveDir,
-                            saveName: self.draft.saveName,
-                            headers: self.draft.headers,
-                            format: self.draft.format
-                        ))
+                        self.runFFmpegFallback(
+                            .init(
+                                url: self.draft.url,
+                                saveDir: self.draft.saveDir,
+                                saveName: self.draft.saveName,
+                                headers: self.draft.headers,
+                                format: self.draft.format
+                            ),
+                            nmdlreStartedAt: self.startedAt ?? Date()
+                        )
                     } else {
                         self.status = .failed("退出码 \(code)")
                         self.notifyDone(success: false)
@@ -262,13 +265,46 @@ final class DownloaderViewModel: ObservableObject {
         return f
     }()
 
-    private func runFFmpegFallback(_ req: FallbackRequest) {
+    /// Where N_m3u8DL-RE would have stashed its per-run artifacts for this
+    /// download. With `saveName` set it's `<saveDir>/<saveName>`; without
+    /// it's `<saveDir>/index_<timestamp>` and we probe ±1 s around the
+    /// start time to cover the case where N_m3u8DL-RE's and our timestamps
+    /// straddle a second boundary.
+    private func nmdlreArtifactDirs(req: FallbackRequest, around ts: Date) -> [String] {
+        if !req.saveName.isEmpty {
+            return ["\(req.saveDir)/\(req.saveName)"]
+        }
+        let f = Self.fileTimestamp
+        return [
+            "\(req.saveDir)/index_\(f.string(from: ts.addingTimeInterval(-1)))",
+            "\(req.saveDir)/index_\(f.string(from: ts))",
+            "\(req.saveDir)/index_\(f.string(from: ts.addingTimeInterval(1)))"
+        ]
+    }
+
+    private func runFFmpegFallback(_ req: FallbackRequest, nmdlreStartedAt: Date) {
         guard let ffmpeg = Self.ffmpegPath,
               FileManager.default.isExecutableFile(atPath: ffmpeg) else {
             appendLog("[fallback] ffmpeg 不可用,跳过 (\(Self.ffmpegPath ?? "未找到"))")
             status = .failed("N_m3u8DL-RE 失败,且未找到 ffmpeg")
             notifyDone(success: false)
             return
+        }
+
+        // N_m3u8DL-RE always creates a per-run subdirectory under --save-dir
+        // before it crashes on the Spectre.Console bug — `index_<ts>/` when
+        // saveName is empty, or `<saveName>/` when set. It contains a stray
+        // `0____/` empty segments dir plus meta.json / raw.m3u8 that the user
+        // doesn't want. Remove them so the save-dir only ends up with the
+        // ffmpeg output.
+        let candidates = nmdlreArtifactDirs(req: req, around: nmdlreStartedAt)
+        for d in candidates where FileManager.default.fileExists(atPath: d) {
+            do {
+                try FileManager.default.removeItem(atPath: d)
+                appendLog("[fallback] 清理 N_m3u8DL-RE 残留: \(d)")
+            } catch {
+                appendLog("[fallback] 清理残留失败(忽略): \(d) — \(error.localizedDescription)")
+            }
         }
 
         var args: [String] = []
@@ -420,13 +456,16 @@ final class DownloaderViewModel: ObservableObject {
                     } else if Self.shouldFallback(code: code, err: err) {
                         // N_m3u8DL-RE exited abnormally — try ffmpeg as a
                         // fallback. Status / notification will be set inside.
-                        self.runFFmpegFallback(.init(
-                            url: u,
-                            saveDir: dir,
-                            saveName: saveName,
-                            headers: extraHeaders.isEmpty ? self.draft.headers : extraHeaders,
-                            format: format
-                        ))
+                        self.runFFmpegFallback(
+                            .init(
+                                url: u,
+                                saveDir: dir,
+                                saveName: saveName,
+                                headers: extraHeaders.isEmpty ? self.draft.headers : extraHeaders,
+                                format: format
+                            ),
+                            nmdlreStartedAt: self.startedAt ?? Date()
+                        )
                     } else {
                         self.status = .failed("退出码 \(code)")
                         self.notifyDone(success: false)
