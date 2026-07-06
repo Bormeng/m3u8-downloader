@@ -30,23 +30,90 @@ struct ContentView: View {
 /// itself (N_m3u8DL-RE) writes "INFO :", "WARN :", "ERROR :" etc.; we
 /// only use this for color-coding — not for control flow.
 enum LogSeverity: String {
-    case info, warn, error, status, comment
+    case info, warn, error, status, comment, progress, success, command
 
     var color: Color {
         switch self {
-        case .info:    return .secondary
-        case .warn:    return .orange
+        case .info:     return .primary
+        case .warn:     return .orange
+        case .error:    return .red
+        case .status:   return .accentColor
+        case .progress: return .blue
+        case .success:  return .green
+        case .command:  return .secondary
+        case .comment:  return .secondary.opacity(0.85)
+        }
+    }
+
+    /// Tinted left bar — error & success lines stand out at a glance.
+    var hasBar: Bool { self == .error || self == .success }
+    var barColor: Color {
+        switch self {
         case .error:   return .red
-        case .status:  return .secondary
-        case .comment: return .secondary.opacity(0.7)
+        case .success: return .green
+        default:       return .clear
+        }
+    }
+
+    /// Subtle row background tint for important categories.
+    var rowBackground: Color {
+        switch self {
+        case .error:   return Color.red.opacity(0.08)
+        case .success: return Color.green.opacity(0.07)
+        case .status:  return Color.accentColor.opacity(0.05)
+        default:       return .clear
         }
     }
 
     static func classify(_ text: String) -> LogSeverity {
         let head = text.trimmingCharacters(in: .whitespaces)
-        // echo from the Swift app (we prepend "$ ..."): treat as a comment.
-        if head.hasPrefix("$") { return .comment }
-        // Bracketed prefixes from N_m3u8DL-RE.
+        let lower = head.lowercased()
+
+        // ── Swift-side summary lines we explicitly append ──
+        if head.hasPrefix("✓") || head.hasPrefix("[完成]") || head.hasPrefix("[下载完成]") {
+            return .success
+        }
+        if head.hasPrefix("✗") || head.hasPrefix("[失败]") || head.hasPrefix("[下载失败]") {
+            return .error
+        }
+        if head.hasPrefix("[清理") || head.hasPrefix("[fallback]") {
+            return .status
+        }
+
+        // ── Command echo (the "$ <cmd>" line) — grey monospace ──
+        if head.hasPrefix("$") { return .command }
+
+        // ── Progress lines ──
+        // ffmpeg stderr: "frame=  123 fps= 30 q=-1.0 size=    1024kB time=00:00:05.00"
+        if head.hasPrefix("frame=") { return .progress }
+        // N_m3u8DL-RE plain-text progress: "  123 / 125  1.23MB/s  00:00:08"
+        if head.range(of: #"^\s*\d+\s*/\s*\d+"#, options: .regularExpression) != nil {
+            return .progress
+        }
+        if lower.contains("进度") || lower.contains("downloading") || lower.contains("merging") {
+            return .progress
+        }
+
+        // ── Success markers ──
+        if head.contains("全部完成") || head.contains("下载完成") ||
+           head.contains("合并完成") || head.contains("保存路径") ||
+           head.contains("保存文件名") {
+            return .success
+        }
+        // ffmpeg mux summary: "video:12345kB audio:0kB ..."
+        if head.range(of: #"^video:\s*\d"#, options: .regularExpression) != nil ||
+           head.range(of: #"^audio:\s*\d"#, options: .regularExpression) != nil {
+            return .success
+        }
+
+        // ── Failure markers ──
+        if lower.contains("conversion failed") ||
+           lower.contains("failed to") ||
+           lower.contains("无法下载") {
+            return .error
+        }
+
+        // ── N_m3u8DL-RE bracketed prefixes ──
         for prefix in ["ERROR", "WARN", "INFO", "STATUS", "DEBUG", "TIP"] {
             // Match "INFO :" or "INFO:" or "INFO  :"
             let pat = "\(prefix)[:\\s]"
@@ -54,15 +121,21 @@ enum LogSeverity: String {
                 switch prefix {
                 case "ERROR":  return .error
                 case "WARN":   return .warn
-                case "INFO", "STATUS", "DEBUG", "TIP":
+                case "STATUS": return .status
+                case "INFO", "DEBUG", "TIP":
                     return .info
                 default: break
                 }
             }
         }
-        // Failed-download messages appended by Swift side
-        if head.hasPrefix("退出码") || head.hasPrefix("URL 为空") { return .error }
-        if head.hasPrefix("[FAIL]") || head.lowercased().contains("error:") { return .error }
+
+        // ── Swift-side error lines ──
+        if head.hasPrefix("退出码") || head.hasPrefix("URL 为空") {
+            return .error
+        }
+        if head.hasPrefix("[FAIL]") || lower.contains("error:") {
+            return .error
+        }
         return .comment
     }
 }
@@ -166,24 +239,30 @@ private struct LogRow: View {
     let line: DownloadLogLine
     var body: some View {
         let severity = LogSeverity.classify(line.text)
-        HStack(alignment: .top, spacing: 6) {
-            Text("[\(line.time.formatted(date: .omitted, time: .standard))]")
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(.tertiary)
-                .frame(width: 64, alignment: .leading)
-            Text(line.text)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(severity.color)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        HStack(alignment: .top, spacing: 0) {
+            // Left bar — only error / success get a coloured edge stripe so
+            // important lines stand out at a glance.
+            Rectangle()
+                .fill(severity.barColor)
+                .frame(width: severity.hasBar ? 3 : 0)
+                .opacity(severity.hasBar ? 1 : 0)
+
+            HStack(alignment: .top, spacing: 6) {
+                Text("[\(line.time.formatted(date: .omitted, time: .standard))]")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 64, alignment: .leading)
+                Text(line.text)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(severity.color)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.leading, 6)
         }
-        .padding(.horizontal, 12)
+        .padding(.trailing, 12)
         .padding(.vertical, 1)
-        .background(
-            severity == .error
-                ? Color.red.opacity(0.08)
-                : Color.clear
-        )
+        .background(severity.rowBackground)
     }
 }
 

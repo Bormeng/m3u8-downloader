@@ -211,15 +211,19 @@ final class DownloaderViewModel: ObservableObject {
                     let elapsed = self.startedAt.map { Date().timeIntervalSince($0) } ?? 0
                     if let err = err {
                         self.status = .failed(err.localizedDescription)
+                        self.appendLog("✗ 启动失败: \(err.localizedDescription)")
                         self.notifyDone(success: false)
                     } else if code == 0 {
                         self.status = .success(elapsed)
+                        self.appendLog("✓ N_m3u8DL-RE 完成 (\(String(format: "%.1f", elapsed))s)")
                         self.notifyDone(success: true)
                     } else if code == 15 || code == 9 {
                         self.status = .cancelled
+                        self.appendLog("✗ 已取消")
                     } else if Self.shouldFallback(code: code, err: err) {
                         // N_m3u8DL-RE exited abnormally — try ffmpeg as a
                         // fallback. Status / notification will be set inside.
+                        self.appendLog("[fallback] N_m3u8DL-RE 退出码 \(code),改用 ffmpeg")
                         self.runFFmpegFallback(
                             .init(
                                 url: self.draft.url,
@@ -232,6 +236,7 @@ final class DownloaderViewModel: ObservableObject {
                         )
                     } else {
                         self.status = .failed("退出码 \(code)")
+                        self.appendLog("✗ N_m3u8DL-RE 失败 (退出码 \(code))")
                         self.notifyDone(success: false)
                     }
                 }
@@ -364,14 +369,18 @@ final class DownloaderViewModel: ObservableObject {
                     let elapsed = self.startedAt.map { Date().timeIntervalSince($0) } ?? 0
                     if let err = err {
                         self.status = .failed("ffmpeg fallback: \(err.localizedDescription)")
+                        self.appendLog("✗ ffmpeg 启动失败: \(err.localizedDescription)")
                         self.notifyDone(success: false)
                     } else if code == 0 {
                         self.status = .success(elapsed)
+                        self.appendLog("✓ ffmpeg fallback 完成 (\(String(format: "%.1f", elapsed))s)")
                         self.notifyDone(success: true)
                     } else if code == 15 || code == 9 {
                         self.status = .cancelled
+                        self.appendLog("✗ ffmpeg 已取消")
                     } else {
                         self.status = .failed("N_m3u8DL-RE 和 ffmpeg fallback 都失败 (ffmpeg 退出码 \(code))")
+                        self.appendLog("✗ ffmpeg fallback 失败 (退出码 \(code))")
                         self.notifyDone(success: false)
                     }
                 }
@@ -447,15 +456,19 @@ final class DownloaderViewModel: ObservableObject {
                     let elapsed = self.startedAt.map { Date().timeIntervalSince($0) } ?? 0
                     if let err = err {
                         self.status = .failed(err.localizedDescription)
+                        self.appendLog("✗ 启动失败: \(err.localizedDescription)")
                         self.notifyDone(success: false)
                     } else if code == 0 {
                         self.status = .success(elapsed)
+                        self.appendLog("✓ N_m3u8DL-RE 完成 (\(String(format: "%.1f", elapsed))s)")
                         self.notifyDone(success: true)
                     } else if code == 15 || code == 9 {
                         self.status = .cancelled
+                        self.appendLog("✗ 已取消")
                     } else if Self.shouldFallback(code: code, err: err) {
                         // N_m3u8DL-RE exited abnormally — try ffmpeg as a
                         // fallback. Status / notification will be set inside.
+                        self.appendLog("[fallback] N_m3u8DL-RE 退出码 \(code),改用 ffmpeg")
                         self.runFFmpegFallback(
                             .init(
                                 url: u,
@@ -468,6 +481,7 @@ final class DownloaderViewModel: ObservableObject {
                         )
                     } else {
                         self.status = .failed("退出码 \(code)")
+                        self.appendLog("✗ N_m3u8DL-RE 失败 (退出码 \(code))")
                         self.notifyDone(success: false)
                     }
                 }
