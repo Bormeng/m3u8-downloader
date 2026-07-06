@@ -13,6 +13,12 @@
   脚本会自动跑 `package_app.sh`(重编译 + 拼 .app bundle + ad-hoc 签名)+ 部署。
 - **部署时不要在 `/Applications/` 留旧版本备份** —— `deploy_app.sh` 已经去掉 stash
   步骤,直接 `rm -rf` + `cp -R` 覆盖。版本回滚靠项目内的 `git`,不需要 OS 层备份目录。
+- **N_m3u8DL-RE 在 macOS 上偶尔崩溃**(Spectre.Console progress bar 的 race condition,
+  `List<T>.RemoveRange` 越界)。这不是 m3u8 链接/headers 的问题,是 .NET 库的 bug。
+  下载器已实现自动 fallback:失败时改跑 `ffmpeg -headers "..." -i URL -c copy
+  -bsf:v h264_mp4toannexb -f mp4 OUT`,并清理 N_m3u8DL-RE 留下的空目录残留。
+  见 `DownloaderViewModel.runFFmpegFallback(...)`。日志里看到 `[fallback]` 前缀
+  就说明触发了,不要把它当 bug 修。
 
 ## 项目结构速览
 
