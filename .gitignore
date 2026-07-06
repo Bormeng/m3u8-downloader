@@ -1,0 +1,18 @@
+# Build artifacts
+/dist/
+/build/
+
+# macOS
+.DS_Store
+
+# Mavis / tooling
+.minimax/
+
+# SwiftPM
+*.xcodeproj/
+.swiftpm/
+Package.resolved
+/SwiftApp/.build/
+
+# N_m3u8DL-RE download residue (incomplete .ts fragments)
+/tests/**/*.ts.tmp
