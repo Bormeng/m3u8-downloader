@@ -4,8 +4,9 @@ import WebKit
 /// A SwiftUI wrapper around `WKWebView` that:
 ///   - installs `JSExtractor.monkeyPatch` at document-start (every frame)
 ///   - tracks navigation state (URL, title, loading, back/forward)
-///   - auto-runs `JSExtractor.extractScript` 2.5 s after every page-load
-///   - exposes a `browserExtract()` method for the manual button
+///   - on every successful page-load, clears the previous link list
+///     and auto-runs `JSExtractor.extractScript` 2.5 s later (gives
+///     SPA-injected players a moment to register their playlists)
 ///   - calls back into the parent with the discovered URLs + the page URL
 struct WebBrowserView: NSViewRepresentable {
     @ObservedObject var vm: BrowserViewModel
@@ -44,12 +45,8 @@ struct WebBrowserView: NSViewRepresentable {
     }
 
     func updateNSView(_ wv: WKWebView, context: Context) {
-        // React to manual "extract now" requests from BrowserViewModel.
-        let requested = vm.browserExtractRequested
-        if context.coordinator.lastExtractRequestSeen != requested {
-            context.coordinator.lastExtractRequestSeen = requested
-            context.coordinator.runExtractNow()
-        }
+        // No-op: extraction is fully driven by WKNavigationDelegate events
+        // in the Coordinator (didFinish → resetResults + scheduleAutoExtract).
     }
 
     static func dismantleNSView(_ wv: WKWebView, coordinator: Coordinator) {
@@ -65,7 +62,6 @@ struct WebBrowserView: NSViewRepresentable {
         let onExtract: ([String], String) -> Void
         weak var webView: WKWebView?
         private var settleTimer: Timer?
-        var lastExtractRequestSeen: Int = 0
 
         init(vm: BrowserViewModel, onExtract: @escaping ([String], String) -> Void) {
             self.vm = vm
@@ -84,12 +80,18 @@ struct WebBrowserView: NSViewRepresentable {
         }
 
         func webView(_ wv: WKWebView, didFinish nav: WKNavigation!) {
+            // Note: only the *main frame* didFinish is wired in WKNavigationDelegate;
+            // sub-frame loads (ads/iframes) won't trigger this — that's fine,
+            // m3u8 players live in the main frame.
             DispatchQueue.main.async {
                 self.vm.isBrowserLoading = false
                 self.vm.browserURL = wv.url?.absoluteString ?? self.vm.browserURL
                 self.vm.browserTitle = wv.title ?? ""
                 self.vm.browserCanGoBack = wv.canGoBack
                 self.vm.browserCanGoForward = wv.canGoForward
+                // Each successful page open replaces any previously-extracted
+                // links — the list only ever reflects the current page.
+                self.vm.resetResults()
                 self.scheduleAutoExtract()
             }
         }
@@ -125,11 +127,6 @@ struct WebBrowserView: NSViewRepresentable {
             ) { [weak self] _ in
                 self?.runExtract()
             }
-        }
-
-        func runExtractNow() {
-            settleTimer?.invalidate()
-            runExtract()
         }
 
         private func runExtract() {

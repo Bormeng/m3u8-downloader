@@ -65,15 +65,6 @@ struct BrowserView: View {
 
                 if vm.isBrowserLoading {
                     ProgressView().controlSize(.small)
-                } else {
-                    Button {
-                        vm.browserRequestExtract()
-                    } label: {
-                        Label("抓取 m3u8", systemImage: "antenna.radiowaves.left.and.right")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .help("立即扫描当前页面的 m3u8")
-                    .disabled(vm.browserURL.isEmpty)
                 }
             }
             .padding(.horizontal, 8)

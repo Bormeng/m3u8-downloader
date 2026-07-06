@@ -66,9 +66,6 @@ final class BrowserViewModel: ObservableObject {
     @Published var isBrowserLoading: Bool = false
     @Published var browserCanGoBack: Bool = false
     @Published var browserCanGoForward: Bool = false
-    /// Set to true briefly to tell the WebBrowserView Coordinator to run an
-    /// immediate extraction (manual button). Coordinator clears it after use.
-    @Published var browserExtractRequested: Int = 0
 
     /// Owned by the NSViewRepresentable; we just hold a weak ref to drive it.
     weak var webView: WKWebView?
@@ -158,15 +155,6 @@ final class BrowserViewModel: ObservableObject {
     func browserGoForward() { webView?.goForward() }
     func browserReload()    { webView?.reload() }
     func browserStop()      { webView?.stopLoading() }
-
-    /// Trigger an immediate extract (manual button). The Coordinator watches
-    /// `browserExtractRequested` and runs the extract when it changes.
-    /// Each manual click starts from a clean slate so the link list only
-    /// reflects the current page (auto-extract on page-load is unchanged).
-    func browserRequestExtract() {
-        resetResults()
-        browserExtractRequested &+= 1
-    }
 
     /// Handle a set of m3u8 URLs discovered by the embedded browser.
     /// - If the loaded page is itself an .m3u8, it's added directly.
