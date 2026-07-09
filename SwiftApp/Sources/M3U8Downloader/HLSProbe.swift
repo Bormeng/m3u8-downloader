@@ -1,4 +1,6 @@
 import Foundation
+import AVFoundation
+import CoreMedia
 
 /// Fetches an HLS playlist over HTTP and parses its variants.
 ///
@@ -133,6 +135,150 @@ enum HLSProbe {
             (a.bandwidth ?? 0) > (b.bandwidth ?? 0)
         }
         return Result(variants: sorted, isMaster: variants.count > 1 || variants[0].resolution != nil)
+    }
+
+    // MARK: - AVFoundation fallback probe
+    //
+    // Media playlists don't carry a `RESOLUTION=` attribute (only master
+    // playlists do). For a single-variant media playlist we can still
+    // discover the actual width/height/frame-rate of the underlying video
+    // track by parsing the first segment ourselves.
+
+    struct MediaTrackInfo {
+        let width: Int
+        let height: Int
+        /// Frames per second (0 if unknown).
+        let frameRate: Double
+        /// Estimated bitrate in bits-per-second, if AVFoundation reports one.
+        let bitrate: Int?
+        /// Short codec tag, e.g. "avc1" / "hvc1".
+        let codec: String?
+    }
+
+    /// Probe the actual video track behind an m3u8 URL.
+    /// Returns `nil` if the segment can't be fetched or there's no
+    /// video track.
+    ///
+    /// Strategy: rather than handing the m3u8 to `AVURLAsset` and
+    /// hoping AVFoundation will fetch the right segment with our
+    /// headers, we (1) download the playlist ourselves with URLSession,
+    /// (2) grab the first segment URL out of it, (3) download that
+    /// segment to a local tmp file with the same headers, and (4) ask
+    /// `AVAsset` to read the local file. This bypasses AVURLAsset's
+    /// m3u8 quirks — `AVURLAssetHTTPHeaderFieldsKey` is unreliable for
+    /// sub-segment requests on macOS, and the older
+    /// `statusOfValue(forKey:)` polling reports `.loaded` immediately
+    /// on the macOS 14 SDK before the asset is actually populated.
+    static func probeMediaTrack(urlString: String,
+                                headers: [String] = [],
+                                timeout: TimeInterval = 25) async -> MediaTrackInfo? {
+        guard let playlistURL = URL(string: urlString) else { return nil }
+
+        // (1) Download the playlist with URLSession.
+        let playlist: String
+        do {
+            var req = URLRequest(url: playlistURL, timeoutInterval: timeout)
+            applyHeaders(headers, to: &req)
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                return nil
+            }
+            guard let body = String(data: data, encoding: .utf8)
+                              ?? String(data: data, encoding: .isoLatin1) else {
+                return nil
+            }
+            playlist = body
+        } catch {
+            return nil
+        }
+
+        // (2) Find the first segment filename from the playlist.
+        let firstSegment = playlist
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .first { line in
+                !line.isEmpty && !line.hasPrefix("#")
+            }
+        guard let segmentName = firstSegment else { return nil }
+        guard let segmentURL = URL(string: segmentName, relativeTo: playlistURL)?.absoluteURL else {
+            return nil
+        }
+
+        // (3) Download the first segment to a tmp file (with the same headers).
+        let tmpFile: URL
+        do {
+            var req = URLRequest(url: segmentURL, timeoutInterval: timeout)
+            applyHeaders(headers, to: &req)
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                return nil
+            }
+            let dir = FileManager.default.temporaryDirectory
+            let file = dir.appendingPathComponent("m3u8probe-\(UUID().uuidString).ts")
+            try data.write(to: file, options: .atomic)
+            tmpFile = file
+        } catch {
+            return nil
+        }
+        // Always clean up the tmp file when we're done.
+        defer { try? FileManager.default.removeItem(at: tmpFile) }
+
+        // (4) Read the local segment with AVAsset.
+        let asset = AVURLAsset(url: tmpFile)
+        let videoTracks: [AVAssetTrack]
+        do {
+            videoTracks = try await asset.loadTracks(withMediaType: .video)
+        } catch {
+            return nil
+        }
+        guard let track = videoTracks.first else { return nil }
+
+        let size = track.naturalSize
+        let width = Int(size.width.rounded())
+        let height = Int(size.height.rounded())
+        let frameRate = Double(track.nominalFrameRate)
+        let bitrate = track.estimatedDataRate > 0
+            ? Int(track.estimatedDataRate.rounded())
+            : nil
+
+        var codec: String?
+        let descs = track.formatDescriptions as? [CMFormatDescription] ?? []
+        if let first = descs.first {
+            let fcc = CMFormatDescriptionGetMediaSubType(first)
+            let bytes: [UInt8] = [
+                UInt8((fcc >> 24) & 0xFF),
+                UInt8((fcc >> 16) & 0xFF),
+                UInt8((fcc >> 8) & 0xFF),
+                UInt8(fcc & 0xFF),
+            ]
+            codec = String(bytes: bytes, encoding: .ascii)?
+                .trimmingCharacters(in: .whitespaces) ?? nil
+        }
+
+        // Guard against zero / placeholder sizes that some streams return
+        // while still warming up.
+        guard width > 0, height > 0 else { return nil }
+
+        return MediaTrackInfo(
+            width: width,
+            height: height,
+            frameRate: frameRate,
+            bitrate: bitrate,
+            codec: codec
+        )
+    }
+
+    /// Apply a list of "Header: value" lines onto an existing URLRequest.
+    private static func applyHeaders(_ lines: [String], to req: inout URLRequest) {
+        for line in lines {
+            let parts = line.split(separator: ":", maxSplits: 1).map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }
+            if parts.count == 2, !parts[0].isEmpty {
+                req.setValue(parts[1], forHTTPHeaderField: parts[0])
+            }
+        }
     }
 
     /// Parses the comma-separated `KEY=VALUE[,KEY=VALUE...]` after `#EXT-X-STREAM-INF:`

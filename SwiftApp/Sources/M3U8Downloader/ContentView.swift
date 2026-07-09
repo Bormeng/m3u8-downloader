@@ -7,9 +7,13 @@ struct ContentView: View {
     @StateObject private var downloader = DownloaderViewModel()
     @StateObject private var browserVM = BrowserViewModel()
     @StateObject private var playerVM = PlayerViewModel()
+    @StateObject private var updateChecker = UpdateChecker.shared
 
     var body: some View {
         VStack(spacing: 0) {
+            UpdateBanner(checker: updateChecker)
+                .animation(.easeInOut(duration: 0.2), value: updateChecker.updateAvailable)
+
             BrowserView()
                 .environmentObject(downloader)
                 .environmentObject(browserVM)
@@ -21,6 +25,12 @@ struct ContentView: View {
                 .environmentObject(downloader)
         }
         .frame(minWidth: 920, minHeight: 640)
+        // Fire-and-forget update check on first appearance. The checker
+        // itself enforces a 24h cache and re-entrancy guard, so calling it
+        // here is safe even if SwiftUI re-runs `.task` for some reason.
+        .task {
+            await updateChecker.check()
+        }
     }
 }
 
@@ -212,21 +222,41 @@ struct SharedLogPane: View {
     }
 
     private var logContent: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 1) {
-                    ForEach(downloader.logs) { line in
-                        LogRow(line: line)
-                            .id(line.id)
-                    }
+        VStack(spacing: 0) {
+            // Fixed progress row — bound to `downloader.currentProgress`,
+            // updated in-place by the ffmpeg fallback instead of being
+            // appended as a new log line every percent. Anchors here so
+            // the rest of the log can scroll under it without the bar
+            // jumping around.
+            if let cp = downloader.currentProgress {
+                HStack(spacing: 6) {
+                    Text(cp)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.blue)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer()
                 }
-                .padding(.vertical, 6)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.blue.opacity(0.08))
             }
-            .background(Color(nsColor: .textBackgroundColor))
-            .onChange(of: downloader.logs.count) { _, _ in
-                if let last = downloader.logs.last {
-                    withAnimation(.linear(duration: 0.1)) {
-                        proxy.scrollTo(last.id, anchor: .bottom)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 1) {
+                        ForEach(downloader.logs) { line in
+                            LogRow(line: line)
+                                .id(line.id)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+                .background(Color(nsColor: .textBackgroundColor))
+                .onChange(of: downloader.logs.count) { _, _ in
+                    if let last = downloader.logs.last {
+                        withAnimation(.linear(duration: 0.1)) {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
                     }
                 }
             }
@@ -292,15 +322,39 @@ struct SharedFooter: View {
     private var statusLabel: some View {
         switch downloader.status {
         case .idle:
-            Label("就绪", systemImage: "circle").foregroundStyle(.secondary)
+            if let bp = downloader.batchProgress {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("正在下载 \(bp.current) / \(bp.total)")
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Label("就绪", systemImage: "circle").foregroundStyle(.secondary)
+            }
         case .running:
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
-                Text("下载中…").foregroundStyle(.secondary)
+                if let bp = downloader.batchProgress {
+                    Text("正在下载 \(bp.current) / \(bp.total)")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("下载中…").foregroundStyle(.secondary)
+                }
             }
         case .success(let sec):
-            Label("完成（\(String(format: "%.1f", sec)) 秒）",
-                  systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+            if let bp = downloader.batchProgress {
+                // We've finished a task in the middle of a batch — show
+                // progress rather than the per-task success line, which would
+                // flicker away as the next task starts.
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("正在下载 \(bp.current) / \(bp.total)")
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Label("完成（\(String(format: "%.1f", sec)) 秒）",
+                      systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+            }
         case .cancelled:
             Label("已取消", systemImage: "xmark.circle").foregroundStyle(.orange)
         case .failed(let msg):
@@ -313,17 +367,21 @@ struct SharedFooter: View {
 // MARK: - Settings (used by macOS App Settings scene)
 
 struct SettingsView: View {
+    @StateObject private var updateChecker = UpdateChecker.shared
+
     var body: some View {
         Form {
+            UpdateCheckerSettingsSection(checker: updateChecker)
+
             Section("二进制路径") {
                 Text(DownloaderViewModel.executablePath)
                     .font(.system(.caption, design: .monospaced))
                     .textSelection(.enabled)
-                Text("如需修改，请编辑 Sources/M3U8Downloader/DownloaderViewModel.swift 中的 executablePath。")
+                Text("N_m3u8DL-RE 已打包进 app bundle，由 bin/package_app.sh 在打包时拷贝。检测到新版本时在本页上方升级即可——下载新二进制替换本路径下的文件，再运行 bin/deploy_app.sh 重新打包。")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
         .padding(20)
-        .frame(width: 460, height: 160)
+        .frame(width: 480, height: 360)
     }
 }

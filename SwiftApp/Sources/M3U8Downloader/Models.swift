@@ -75,6 +75,9 @@ struct M3U8Variant: Identifiable, Hashable {
             let mbps = Double(b) / 1_000_000.0
             parts.append(String(format: "%.2f Mbps", mbps))
         }
+        if let fr = frameRate, fr > 0 {
+            parts.append(String(format: "%.0ffps", fr))
+        }
         if parts.isEmpty { return url }
         return parts.joined(separator: " · ")
     }

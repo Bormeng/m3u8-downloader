@@ -11,7 +11,7 @@ import SwiftUI
 ///   ("Key: Value" lines) and translated to the dictionary AVFoundation
 ///   understands. Supported on macOS 13+ (this app targets 14+).
 /// - `holdRate` is applied while the user is pressing on the video surface;
-///   releasing reverts to `normalRate` (or paused). 0 means paused.
+///   releasing reverts to `playbackRate` (or paused). 0 means paused.
 @MainActor
 final class PlayerViewModel: ObservableObject {
 
@@ -19,8 +19,24 @@ final class PlayerViewModel: ObservableObject {
 
     /// 倍速档位(用户长按时的速率)
     let holdRate: Float = 2.0
-    /// 正常播放速率
-    let normalRate: Float = 1.0
+    /// 播放速率 slider 的范围 / 步进
+    let minRate: Float = 0.5
+    let maxRate: Float = 3.0
+    let rateStep: Float = 0.5
+    /// 双击快进 / 快退的跨度 slider 的范围 / 步进
+    let minSkip: Double = 1
+    let maxSkip: Double = 30
+    let skipStep: Double = 1
+    /// 快进 / 快退跨度的默认值(首次启动 / 持久化值越界时用)
+    let defaultSkipSeconds: Double = 5
+
+    // MARK: - Skip flash HUD
+
+    /// 双击左右屏后给用户的瞬态视觉反馈。0.8s 自动清空。
+    enum SkipFlash: Equatable {
+        case backward(Double)  // 秒数
+        case forward(Double)
+    }
 
     // MARK: - Published state
 
@@ -35,6 +51,14 @@ final class PlayerViewModel: ObservableObject {
     @Published var isPanelVisible: Bool = false
     /// 长按状态(由 PlayerView 的手势驱动)
     @Published private(set) var isPressing: Bool = false
+    /// 双击左右屏的瞬态反馈,nil = 不显示
+    @Published private(set) var skipFlash: SkipFlash?
+    /// 当前播放速率(0.5x ~ 3x, step 0.5)。持久化到 UserDefaults,跨会话保留。
+    @Published private(set) var playbackRate: Float
+    /// 双击右半屏的快进跨度(秒,1 ~ 30, step 1)。持久化。
+    @Published private(set) var skipForwardSeconds: Double
+    /// 双击左半屏的快退跨度(秒,1 ~ 30, step 1)。持久化。
+    @Published private(set) var skipBackwardSeconds: Double
 
     // MARK: - Private observers
     //
@@ -47,6 +71,26 @@ final class PlayerViewModel: ObservableObject {
     private nonisolated(unsafe) var rateObserver: NSKeyValueObservation?
     private nonisolated(unsafe) var timeObserverToken: Any?
     private nonisolated(unsafe) var endObserver: NSObjectProtocol?
+    /// 双击 flash 的延迟清空任务;新一次双击会 cancel 旧的,避免错乱
+    private var flashTask: Task<Void, Never>?
+
+    /// UserDefaults key:持久化用户选的播放速率
+    private static let playbackRateKey = "player.playbackRate"
+    private static let skipForwardKey = "player.skipForwardSeconds"
+    private static let skipBackwardKey = "player.skipBackwardSeconds"
+
+    init() {
+        // 播放速率: clamp 到 slider 范围,非法值回退到 1.0
+        let rate = UserDefaults.standard.object(forKey: Self.playbackRateKey) as? Float ?? 1.0
+        self.playbackRate = min(max(rate, minRate), maxRate)
+
+        // 快进 / 快退跨度: 非法或越界回退到默认值
+        let fwd = UserDefaults.standard.object(forKey: Self.skipForwardKey) as? Double ?? defaultSkipSeconds
+        self.skipForwardSeconds = min(max(fwd, minSkip), maxSkip)
+
+        let bwd = UserDefaults.standard.object(forKey: Self.skipBackwardKey) as? Double ?? defaultSkipSeconds
+        self.skipBackwardSeconds = min(max(bwd, minSkip), maxSkip)
+    }
 
     deinit {
         // KVO / periodic time observer 都靠 [weak self] 自动停,无需操作。
@@ -61,18 +105,19 @@ final class PlayerViewModel: ObservableObject {
     /// Load a URL into the player. Replaces any current item. Headers are
     /// "Key: Value" strings; the value-side whitespace is trimmed.
     /// The referer is added as a `Referer:` header if no manual one is set.
+    ///
+    /// Every call rebuilds the `AVPlayer` from scratch — we previously had a
+    /// "same URL → resume" shortcut that re-used the existing player, but
+    /// that path interacted badly with the SwiftUI ZStack layout: when the
+    /// user clicked ▶ on a *different* link, `vm.player` did change but the
+    /// underlying `AVPlayerLayer.player` sometimes stayed on the previous
+    /// video, so the user saw the old content. Rebuilding every time makes
+    /// the layer swap observable and predictable. The "save the buffer"
+    /// benefit wasn't worth the visual bug.
     func play(urlString: String, referer: String?, headers: [String]) {
         let urlString = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !urlString.isEmpty, let url = URL(string: urlString) else {
             lastError = "URL 为空或格式错误"
-            return
-        }
-
-        // 如果点的是同一个 URL,直接恢复播放(避免重建 AVPlayer 浪费缓冲)
-        if currentURLString == urlString, let p = player {
-            isPanelVisible = true
-            p.play()
-            applyRate()
             return
         }
 
@@ -93,10 +138,16 @@ final class PlayerViewModel: ObservableObject {
         newPlayer.automaticallyWaitsToMinimizeStalling = true
         newPlayer.actionAtItemEnd = .pause
 
-        // Tear down old observers
+        // Tear down old observers. Note: `timeObserverToken` is registered on
+        // the *old* player, so it must be removed from `player` (the old one)
+        // before we overwrite the property — the previous version called
+        // `newPlayer.removeTimeObserver(tok)`, which was a no-op (newPlayer
+        // doesn't own that token) and leaked the old player's time observer.
+        if let oldP = player, let tok = timeObserverToken {
+            oldP.removeTimeObserver(tok)
+        }
         statusObserver?.invalidate()
         rateObserver?.invalidate()
-        if let tok = timeObserverToken { newPlayer.removeTimeObserver(tok) }
         if let end = endObserver { NotificationCenter.default.removeObserver(end) }
 
         // KVO: item readiness
@@ -187,6 +238,40 @@ final class PlayerViewModel: ObservableObject {
         currentTime = t.seconds
     }
 
+    // MARK: - Skip (double-tap on left/right half)
+
+    /// 双击视频右半屏 → 前进 skipForwardSeconds 秒(用户可调)
+    func skipForward() {
+        guard duration > 0 else { return }
+        let s = skipForwardSeconds
+        seek(to: currentTime + s)
+        flashSkip(.forward(s))
+    }
+
+    /// 双击视频左半屏 → 后退 skipBackwardSeconds 秒(用户可调)
+    func skipBackward() {
+        guard duration > 0 else { return }
+        let s = skipBackwardSeconds
+        seek(to: currentTime - s)
+        flashSkip(.backward(s))
+    }
+
+    /// 触发一次 HUD 闪烁,0.8s 后自动清空。多次触发会 cancel 上一次的,
+    /// 避免最后一次 flash 被更早的清空任务提前抹掉。
+    private func flashSkip(_ flash: SkipFlash) {
+        flashTask?.cancel()
+        skipFlash = flash
+        flashTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self else { return }
+                // 只清"同一次"flash,被新一次覆盖过的不要清掉
+                if self.skipFlash == flash { self.skipFlash = nil }
+            }
+        }
+    }
+
     /// Close the player and tear down the current item. Keeps the
     /// `PlayerViewModel` alive so the next play() is a fresh setup.
     func close() {
@@ -209,6 +294,8 @@ final class PlayerViewModel: ObservableObject {
         isPressing = false
         isPanelVisible = false
         lastError = nil
+        flashTask?.cancel(); flashTask = nil
+        skipFlash = nil
     }
 
     // MARK: - Hold-to-speed
@@ -231,10 +318,39 @@ final class PlayerViewModel: ObservableObject {
         if isPressing {
             p.rate = holdRate
         } else if isPlaying {
-            p.rate = normalRate
+            p.rate = playbackRate
         } else {
             p.rate = 0
         }
+    }
+
+    /// 设置播放速率(0.5x ~ 3x, step 0.5)。持久化到 UserDefaults,立即生效。
+    /// - 注意:如果当前是暂停状态,只更新状态和持久化,不动 player.rate,
+    ///   等下次 play() 触发 applyRate() 再应用。
+    func setPlaybackRate(_ rate: Float) {
+        guard rate >= minRate, rate <= maxRate else { return }
+        guard abs(rate - playbackRate) > 0.001 else { return }
+        playbackRate = rate
+        UserDefaults.standard.set(rate, forKey: Self.playbackRateKey)
+        if isPlaying, !isPressing {
+            player?.rate = rate
+        }
+    }
+
+    /// 设置双击右半屏的快进跨度(秒,1 ~ 30, step 1)。持久化。
+    func setSkipForward(_ seconds: Double) {
+        let s = min(max(seconds, minSkip), maxSkip)
+        guard abs(s - skipForwardSeconds) > 0.001 else { return }
+        skipForwardSeconds = s
+        UserDefaults.standard.set(s, forKey: Self.skipForwardKey)
+    }
+
+    /// 设置双击左半屏的快退跨度(秒,1 ~ 30, step 1)。持久化。
+    func setSkipBackward(_ seconds: Double) {
+        let s = min(max(seconds, minSkip), maxSkip)
+        guard abs(s - skipBackwardSeconds) > 0.001 else { return }
+        skipBackwardSeconds = s
+        UserDefaults.standard.set(s, forKey: Self.skipBackwardKey)
     }
 
     // MARK: - Header parsing

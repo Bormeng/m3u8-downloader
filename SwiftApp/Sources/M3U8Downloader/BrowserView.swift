@@ -10,16 +10,39 @@ struct BrowserView: View {
     @EnvironmentObject var vm: BrowserViewModel
     @EnvironmentObject var downloader: DownloaderViewModel
     @EnvironmentObject var playerVM: PlayerViewModel
-    @State private var showDirectInput: Bool = true
+    @State private var showDirectInput: Bool = false
+    @State private var showHeaders: Bool = false
     @State private var logCollapsed: Bool = true
+    @State private var isWindowFullscreen: Bool = false
     @FocusState private var urlFieldFocused: Bool
 
     var body: some View {
-        HSplitView {
-            inputPane
-                .frame(minWidth: 460, idealWidth: 540)
-            resultsPane
-                .frame(minWidth: 460)
+        VStack(spacing: 0) {
+            // ── Native title bar spacer (fullscreen only) ───────────────
+            // In macOS fullscreen, AppKit auto-hides the native window
+            // title bar but SwiftUI does NOT reserve a top safe-area inset
+            // for it (only the system menu bar). Because HSplitView is an
+            // AppKit-backed view, it draws straight to the top of the
+            // SwiftUI frame — and the BrowserView's nav bar (URL TextField
+            // + back/forward/reload/stop buttons) ends up overlapping the
+            // slot where the title bar would have been.
+            //
+            // We mirror the standard macOS title bar height (28pt) here
+            // ONLY when the window is actually fullscreen. In normal
+            // windowed / maximised mode the native title bar is already
+            // visible at the top, so we leave the layout alone there.
+            if isWindowFullscreen {
+                Color.clear
+                    .frame(height: 28)
+                    .allowsHitTesting(false)
+            }
+
+            HSplitView {
+                inputPane
+                    .frame(minWidth: 460, idealWidth: 540)
+                resultsPane
+                    .frame(minWidth: 460)
+            }
         }
         .background(
             // ⌘L focuses the URL field (Safari-style).
@@ -27,6 +50,15 @@ struct BrowserView: View {
                 .keyboardShortcut("l", modifiers: .command)
                 .hidden()
         )
+        // Hook into AppKit to learn whether we're in native fullscreen.
+        // `WindowAccessor` walks up the responder chain to grab the
+        // hosting NSWindow; we then seed `isWindowFullscreen` from the
+        // window's current styleMask and subscribe to AppKit's
+        // enter/exit-fullscreen notifications so the spacer appears and
+        // disappears as the user toggles fullscreen at runtime.
+        .background(WindowAccessor { window in
+            WindowFullscreenTracker.attach(window: window, state: $isWindowFullscreen)
+        })
         .onAppear {
             // Auto-focus the URL field on window open so the user can just
             // start typing.
@@ -86,25 +118,54 @@ struct BrowserView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
 
-            // ── Browser preview (fills remaining space) ─────────
-            WebBrowserView(vm: vm) { urls, pageURL in
-                vm.handleBrowserExtract(urls: urls, pageURL: pageURL)
+            // ── Extraction banner (only visible while isExtracting) ──
+            // Rendered as its own VStack row instead of `.overlay()` on
+            // the WebBrowserView. NSViewRepresentable's SwiftUI layout
+            // already has quirks (WKWebView's frame is managed internally),
+            // and tacking an overlay on top was causing the PlayerView's
+            // controls to lose hit-testing once the player opened — the
+            // overlay container was swallowing clicks on the area below.
+            // As a regular row, it claims its own space when visible and
+            // zero space when hidden, with no interference.
+            if vm.isExtracting {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("正在抓取 m3u8…")
+                        .font(.caption)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 5)
+                .background(.quaternary.opacity(0.35))
+                .transition(.opacity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: .windowBackgroundColor))
 
-            // ── App 内嵌播放器(自动接管 m3u8 预览) ──
-            // 默认不渲染,只有 PlayerViewModel 收到 play() 后才出现,出现时自动展开。
-            if playerVM.isPanelVisible {
-                PlayerView()
-                    .environmentObject(playerVM)
-                    .frame(maxHeight: 360)
-                    .padding(.horizontal, 6)
-                    .padding(.bottom, 6)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            // ── Browser ⇄ Player swap area ───────────────────────
+            // 两者通过 ZStack 互斥占满下方区域:
+            //   - 平时显示浏览器(WebBrowserView 始终保留在 view tree 里,
+            //     隐藏时只是 opacity=0 + allowsHitTesting=false,这样关闭
+            //     播放器后浏览器还在原来的页面、不重新加载)
+            //   - 点了 ▶ 之后,播放器淡入覆盖整个区域,占满浏览器页面空间
+            //   - 关掉播放器时浏览器淡入回来
+            ZStack {
+                WebBrowserView(vm: vm) { urls, pageURL in
+                    vm.handleBrowserExtract(urls: urls, pageURL: pageURL)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .opacity(playerVM.isPanelVisible ? 0 : 1)
+                .allowsHitTesting(!playerVM.isPanelVisible)
+
+                if playerVM.isPanelVisible {
+                    PlayerView()
+                        .environmentObject(playerVM)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .transition(.opacity)
+                }
             }
+            .frame(maxHeight: .infinity)
         }
         .animation(.easeInOut(duration: 0.18), value: playerVM.isPanelVisible)
+        .animation(.easeInOut(duration: 0.2), value: vm.isExtracting)
     }
 
     // MARK: - Right: input controls + discovered links + log
@@ -139,7 +200,11 @@ struct BrowserView: View {
             HStack {
                 Text("链接与分辨率").font(.headline)
                 Spacer()
-                if vm.isProbing {
+                if vm.isExtracting {
+                    ProgressView().controlSize(.small)
+                    Text("抓取 m3u8 中…")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if vm.isProbing {
                     ProgressView().controlSize(.small)
                     Text("探测中…").font(.caption).foregroundStyle(.secondary)
                 }
@@ -238,7 +303,7 @@ struct BrowserView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     TextEditor(text: $vm.urlInput)
                         .font(.system(.callout, design: .monospaced))
-                        .frame(minHeight: 90)
+                        .frame(minHeight: 56, maxHeight: 56)
                         .overlay(RoundedRectangle(cornerRadius: 6)
                             .stroke(.quaternary, lineWidth: 1))
                     HStack {
@@ -271,35 +336,40 @@ struct BrowserView: View {
                     .font(.callout.weight(.semibold))
             }
 
-            Group {
-                sectionTitle("HTTP 请求头（可选）")
-                HStack {
-                    TextField("Cookie: xxx", text: $vm.headerInput)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { vm.addHeader() }
-                    Button("添加") { vm.addHeader() }
-                }
-                if vm.headers.isEmpty {
-                    Text("（无）").font(.caption).foregroundStyle(.secondary)
-                } else {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(vm.headers, id: \.self) { h in
-                            HStack {
-                                Text(h)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .lineLimit(1).truncationMode(.middle)
-                                Spacer()
-                                Button {
-                                    vm.removeHeader(h)
-                                } label: { Image(systemName: "minus.circle") }
-                                    .buttonStyle(.plain)
-                                    .foregroundStyle(.secondary)
+            DisclosureGroup(isExpanded: $showHeaders) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        TextField("Cookie: xxx", text: $vm.headerInput)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit { vm.addHeader() }
+                        Button("添加") { vm.addHeader() }
+                    }
+                    if vm.headers.isEmpty {
+                        Text("（无）").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(vm.headers, id: \.self) { h in
+                                HStack {
+                                    Text(h)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .lineLimit(1).truncationMode(.middle)
+                                    Spacer()
+                                    Button {
+                                        vm.removeHeader(h)
+                                    } label: { Image(systemName: "minus.circle") }
+                                        .buttonStyle(.plain)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.4)))
                     }
-                    .padding(8)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.4)))
                 }
+                .padding(.top, 4)
+            } label: {
+                Label("HTTP 请求头（可选）", systemImage: "list.bullet.rectangle")
+                    .font(.callout.weight(.semibold))
             }
         }
         .padding(.horizontal, 12)
@@ -311,18 +381,24 @@ struct BrowserView: View {
         guard !payload.isEmpty else { return }
         // Auto-expand the log pane so users can watch progress live.
         logCollapsed = false
-        for (i, item) in payload.enumerated() {
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: UInt64(i) * 50_000_000)
-                let referer = vm.referer(forVariantURL: item.url)
-                downloader.startExternal(
-                    url: item.url,
-                    saveName: item.name,
-                    saveDir: vm.saveDir,
-                    extraHeaders: vm.headersWithReferer(referer)
-                )
+        // Diagnostic — confirms the batch received N items (or just 1, if
+        // the source only advertised a single variant). The per-item URL
+        // list is dropped here because the per-item `▶ 批量 [N / total] URL`
+        // lines that follow already show each URL individually, and this
+        // single-line receipt can otherwise be hundreds of chars long.
+        downloader.appendLogExternal("[批量] 收到 \(payload.count) 个 item")
+        // Hand the whole list to the downloader, which now runs them
+        // serially (one at a time). The old 50ms-staggered fan-out here
+        // raced against the single shared ProcessRunner and only the last
+        // item ever finished — see DownloaderViewModel.startBatchExternal.
+        downloader.startBatchExternal(
+            items: payload,
+            saveDir: vm.saveDir,
+            extraHeaders: { [vm] url in
+                let referer = vm.referer(forVariantURL: url)
+                return vm.headersWithReferer(referer)
             }
-        }
+        )
     }
 
     private func sectionTitle(_ s: String) -> some View {
@@ -425,9 +501,11 @@ private struct VariantRow: View {
     let onPlay: () -> Void
 
     /// 只有视频变体可以播放(音轨/字幕轨单独播放没意义)。
+    /// "MEDIA" 是 HLSProbe 在解析单条 media playlist 时合成的 sentinel,
+    /// 实际就是单个视频,应该可播。
     private var isPlayable: Bool {
         guard let mt = variant.mediaType else { return true }
-        return mt == "VIDEO"
+        return mt == "VIDEO" || mt == "MEDIA"
     }
 
     var body: some View {
@@ -570,5 +648,88 @@ struct SaveDirPanel: View {
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
             .textCase(.uppercase)
+    }
+}
+
+// MARK: - Fullscreen detection helper
+//
+// SwiftUI on macOS doesn't surface the window's fullscreen state as a
+// first-class environment value (as of macOS 14), but AppKit does — via
+// NSWindow.styleMask.contains(.fullScreen) and the
+// `NSWindow.didEnterFullScreenNotification` / `didExitFullScreenNotification`
+// pair. We bridge that into SwiftUI with two small types:
+//
+//   * `WindowAccessor` — an invisible NSViewRepresentable that walks up
+//     the responder chain to grab its hosting NSWindow, then hands it
+//     off to the tracker.
+//   * `WindowFullscreenTracker` — an enum-namespaced `attach(...)` that
+//     seeds the SwiftUI binding from the window's current styleMask and
+//     wires up enter/exit-fullscreen notification observers scoped to
+//     *that specific window* (filtering with the `object:` argument so
+//     other windows in the process can't accidentally toggle our state).
+//
+// Together they let the BrowserView render the title-bar-height spacer
+// only when the window is actually in native fullscreen, leaving the
+// windowed / maximised layout untouched.
+
+private struct WindowAccessor: NSViewRepresentable {
+    let onResolve: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView(frame: .zero)
+        // The view isn't attached to a window yet at make-time, so defer.
+        DispatchQueue.main.async { [weak v] in
+            onResolve(v?.window)
+        }
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { [weak nsView] in
+            onResolve(nsView?.window)
+        }
+    }
+}
+
+private enum WindowFullscreenTracker {
+    /// Active observation tokens, keyed by NSWindow identity so we can
+    /// tear them down cleanly when the SwiftUI view goes away (or when
+    /// the window itself changes — e.g. after a relaunch).
+    private static var observers: [ObjectIdentifier: [NSObjectProtocol]] = [:]
+
+    static func attach(window: NSWindow?, state binding: Binding<Bool>) {
+        guard let window = window else { return }
+        let key = ObjectIdentifier(window)
+
+        // Seed from the current styleMask so the first render is correct
+        // even if the user enters fullscreen while the app is launching.
+        let now = window.styleMask.contains(.fullScreen)
+        if binding.wrappedValue != now {
+            binding.wrappedValue = now
+        }
+
+        // Already wired up for this window? Don't double-subscribe.
+        if observers[key] != nil { return }
+
+        let center = NotificationCenter.default
+        let enter = center.addObserver(
+            forName: NSWindow.didEnterFullScreenNotification,
+            object: window, queue: .main
+        ) { _ in
+            binding.wrappedValue = true
+        }
+        let exit = center.addObserver(
+            forName: NSWindow.didExitFullScreenNotification,
+            object: window, queue: .main
+        ) { _ in
+            binding.wrappedValue = false
+        }
+        observers[key] = [enter, exit]
+    }
+
+    static func detach(window: NSWindow) {
+        let key = ObjectIdentifier(window)
+        observers[key]?.forEach { NotificationCenter.default.removeObserver($0) }
+        observers.removeValue(forKey: key)
     }
 }

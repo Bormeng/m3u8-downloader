@@ -69,7 +69,13 @@ struct WebBrowserView: NSViewRepresentable {
         }
 
         func attachWebView(_ w: WKWebView) { webView = w }
-        func detach() { settleTimer?.invalidate(); settleTimer = nil; webView = nil }
+        func detach() {
+            settleTimer?.invalidate(); settleTimer = nil
+            DispatchQueue.main.async { [weak self] in
+                self?.vm.isExtracting = false
+            }
+            webView = nil
+        }
 
         // MARK: Navigation lifecycle
 
@@ -92,6 +98,10 @@ struct WebBrowserView: NSViewRepresentable {
                 // Each successful page open replaces any previously-extracted
                 // links — the list only ever reflects the current page.
                 self.vm.resetResults()
+                // Mark extraction-in-progress BEFORE scheduling the timer so
+                // the UI shows "抓取中…" during the 2.5s settle window, not
+                // just during the JS evaluation itself.
+                self.vm.isExtracting = true
                 self.scheduleAutoExtract()
             }
         }
@@ -130,7 +140,14 @@ struct WebBrowserView: NSViewRepresentable {
         }
 
         private func runExtract() {
-            guard let wv = webView else { return }
+            guard let wv = webView else {
+                // Webview gone (view dismantled mid-extract). Don't leave
+                // the "抓取中…" indicator stuck on.
+                DispatchQueue.main.async { [weak self] in
+                    self?.vm.isExtracting = false
+                }
+                return
+            }
             wv.evaluateJavaScript(JSExtractor.extractScript) { [weak self] result, _ in
                 guard let self = self else { return }
                 var urls: [String] = []
@@ -143,6 +160,7 @@ struct WebBrowserView: NSViewRepresentable {
                 }
                 let pageURL = wv.url?.absoluteString ?? ""
                 DispatchQueue.main.async {
+                    self.vm.isExtracting = false
                     if !urls.isEmpty {
                         self.onExtract(urls, pageURL)
                     }

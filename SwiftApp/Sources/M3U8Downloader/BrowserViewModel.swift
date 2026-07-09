@@ -35,6 +35,12 @@ final class BrowserViewModel: ObservableObject {
 
     @Published var links: [M3U8Link] = []
     @Published var isProbing: Bool = false
+    /// `true` between "page finished loading" and "JS extract returned".
+    /// Covers the 2.5s settle window (waiting for SPA-injected players to
+    /// register their playlists) + the JS evaluation itself — without this
+    /// flag, the user sees the page fully loaded but no link cards yet, and
+    /// has no idea the app is still working on grabbing m3u8s.
+    @Published var isExtracting: Bool = false
     @Published var selectedIDs: Set<UUID> = []
     @Published var lastError: String?
 
@@ -217,13 +223,47 @@ final class BrowserViewModel: ObservableObject {
         }
         do {
             let r = try await HLSProbe.probe(urlString: urlString, headers: probeHeaders)
+            var variants = r.variants
+            let isMaster = r.isMaster
+            var mediaSummary: String? = nil
+
+            // Media playlists don't carry RESOLUTION attributes. If we only
+            // got a single variant and it has no resolution, ask
+            // AVFoundation to inspect the underlying video track so the user
+            // sees the real 1920x1080 / 30fps in the list instead of a
+            // generic "Media" label.
+            if !isMaster, variants.count == 1, variants[0].resolution == nil {
+                if let info = await HLSProbe.probeMediaTrack(
+                    urlString: urlString,
+                    headers: probeHeaders) {
+                    var v = variants[0]
+                    v.resolution = "\(info.width)x\(info.height)"
+                    if info.frameRate > 0 { v.frameRate = info.frameRate }
+                    if v.bandwidth == nil, let b = info.bitrate { v.bandwidth = b }
+                    if (v.codecs ?? "").isEmpty, let c = info.codec { v.codecs = c }
+                    variants[0] = v
+                    var summary = "Media · \(info.width)x\(info.height)"
+                    if info.frameRate > 0 {
+                        summary += String(format: " · %.0ffps", info.frameRate)
+                    }
+                    mediaSummary = summary
+                }
+            }
+
+            let finalVariants = variants
+            let finalIsMaster = isMaster
+            let finalSummary = mediaSummary
             await MainActor.run {
                 guard let i = self.links.firstIndex(where: { $0.id == id }) else { return }
-                self.links[i].variants = r.variants
+                self.links[i].variants = finalVariants
                 self.links[i].status = .done
-                self.links[i].statusMessage = r.isMaster
-                    ? "Master · \(r.variants.count) 个码率"
-                    : "Media · 单一码率"
+                if finalIsMaster {
+                    self.links[i].statusMessage = "Master · \(finalVariants.count) 个码率"
+                } else if let s = finalSummary {
+                    self.links[i].statusMessage = s
+                } else {
+                    self.links[i].statusMessage = "Media · 单一码率"
+                }
             }
         } catch {
             await MainActor.run {
@@ -279,13 +319,38 @@ final class BrowserViewModel: ObservableObject {
                 if !selectedIDs.isEmpty && !selectedIDs.contains(v.id) { continue }
                 let prefix = saveNamePrefix.trimmingCharacters(in: .whitespaces)
                 let res = v.resolution ?? v.mediaType ?? "media"
+                // `i+1` only disambiguates *variants within one link*
+                // (e.g. a master playlist's 1080p / 720p rows). When the
+                // user "全选"es a list of independent m3u8 URLs (each a
+                // single-variant media playlist, like 11 different videos
+                // from the same site), every link's i is 0 and every name
+                // collides — so ffmpeg fallback ends up overwriting itself
+                // 10 times. Inject a per-link URL key to keep names unique.
+                let key = shortUrlKey(link.url)
                 let name = prefix.isEmpty
-                    ? "\(urlHost(link.url))_\(res)_\(i+1)"
-                    : "\(prefix)_\(res)_\(i+1)"
+                    ? "\(urlHost(link.url))_\(key)_\(res)_\(i+1)"
+                    : "\(prefix)_\(key)_\(res)_\(i+1)"
                 out.append((v.url, name))
             }
         }
         return out
+    }
+
+    /// Pull a short, filename-safe key from the URL path that uniquely
+    /// identifies a given m3u8 within a single batch. We prefer a long
+    /// hex-looking segment (most CMSes put a 24-char id in the URL like
+    /// `697ce22b3abc34096443971c`); fall back to the last directory; fall
+    /// back to the host.
+    private func shortUrlKey(_ s: String) -> String {
+        guard let u = URL(string: s) else { return "video" }
+        let parts = u.path.split(separator: "/").map(String.init).filter { !$0.isEmpty }
+        if let hex = parts.first(where: { $0.count >= 16 && $0.allSatisfy(\.isHexDigit) }) {
+            return String(hex.prefix(8))
+        }
+        if parts.count >= 2 {
+            return parts[parts.count - 2]
+        }
+        return parts.first ?? urlHost(s)
     }
 
     private func urlHost(_ s: String) -> String {

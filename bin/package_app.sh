@@ -18,16 +18,31 @@ swift build -c release --package-path "$ROOT/SwiftApp"
 [[ -x "$BIN" ]] || { echo "error: binary not found at $BIN" >&2; exit 1; }
 
 echo "==> 2/5  Build AppIcon.icns"
-if [[ ! -x "$PYTHON_ICON_TOOLS" ]]; then
-  echo "warning: /tmp/icon-tools venv missing; create it with:"
-  echo "  uv venv /tmp/icon-tools --python 3.12"
-  echo "  VIRTUAL_ENV=/tmp/icon-tools uv pip install pillow"
-  exit 1
+# Rebuild only when the source PNG or the helper script changes; otherwise
+# reuse the cached .icns so we don't depend on the PIL venv being healthy
+# for every code change.
+needs_icns_rebuild=0
+if [[ ! -f "$ICNS_OUT" ]]; then
+  needs_icns_rebuild=1
+elif [[ "$ROOT/docs/icon_candidate_1_geometric.png" -nt "$ICNS_OUT" ]]; then
+  needs_icns_rebuild=1
+elif [[ "$ROOT/bin/build_icns.py" -nt "$ICNS_OUT" ]]; then
+  needs_icns_rebuild=1
 fi
-mkdir -p "$ICONSET_DIR"
-"$PYTHON_ICON_TOOLS" "$ROOT/bin/build_icns.py" "$ICONSET_DIR"
-iconutil -c icns "$ICONSET_DIR" -o "$ICNS_OUT"
-file "$ICNS_OUT"
+if (( needs_icns_rebuild )); then
+  if [[ ! -x "$PYTHON_ICON_TOOLS" ]]; then
+    echo "warning: /tmp/icon-tools venv missing; create it with:"
+    echo "  uv venv /tmp/icon-tools --python 3.12"
+    echo "  VIRTUAL_ENV=/tmp/icon-tools uv pip install pillow"
+    exit 1
+  fi
+  mkdir -p "$ICONSET_DIR"
+  "$PYTHON_ICON_TOOLS" "$ROOT/bin/build_icns.py" "$ICONSET_DIR"
+  iconutil -c icns "$ICONSET_DIR" -o "$ICNS_OUT"
+  file "$ICNS_OUT"
+else
+  echo "       (cached $ICNS_OUT — skipping rebuild)"
+fi
 
 echo "==> 3/5  Assemble .app bundle"
 rm -rf "$APP_DIR"

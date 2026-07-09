@@ -6,13 +6,25 @@ import AppKit
 @MainActor
 final class DownloaderViewModel: ObservableObject {
 
-    /// Resolved at runtime: prefer the bundled copy, fall back to /Users/ming/Movies/N_m3u8DL-RE.
+    /// Path to the bundled N_m3u8DL-RE binary. `bin/package_app.sh` copies
+    /// it into `Contents/MacOS/` next to the main executable, so we resolve
+    /// it as a sibling executable of the bundle. There is intentionally no
+    /// fallback to a hard-coded home-directory copy — if the binary is
+    /// missing from the bundle, the caller surfaces the path in the error
+    /// message so we know to rebuild the .app.
     static var executablePath: String {
-        if let bundled = Bundle.main.path(forResource: "N_m3u8DL-RE", ofType: nil),
-           FileManager.default.isExecutableFile(atPath: bundled) {
-            return bundled
+        // 1. Apple-blessed API for sibling executables in Contents/MacOS/.
+        if let url = Bundle.main.url(forAuxiliaryExecutable: "N_m3u8DL-RE"),
+           FileManager.default.isExecutableFile(atPath: url.path) {
+            return url.path
         }
-        return "/Users/ming/Movies/N_m3u8DL-RE"
+        // 2. Derive from the main executable's directory — covers running
+        //    outside a real .app bundle during `swift run` development.
+        let candidate = Bundle.main.executableURL?
+            .deletingLastPathComponent()
+            .appendingPathComponent("N_m3u8DL-RE")
+            .path ?? "/missing/N_m3u8DL-RE"
+        return candidate
     }
 
     /// Auto-detected path to the `ffmpeg` binary. N_m3u8DL-RE needs ffmpeg
@@ -96,10 +108,24 @@ final class DownloaderViewModel: ObservableObject {
     )
     @Published var status: DownloadStatus = .idle
     @Published var logs: [DownloadLogLine] = []
+    /// Single-line, in-place progress text. The UI binds this to a fixed
+    /// row above the scrollable log so the progress bar stays anchored
+    /// (instead of being appended as a new log line every percent). nil
+    /// when no active download or when the ffmpeg fallback hasn't reported
+    /// a Duration yet.
+    @Published var currentProgress: String? = nil
     @Published var headerInput: String = ""    // staging for new header
     @Published var startedAt: Date?
 
-    private let runner = ProcessRunner()
+    /// (current, total) for a batch download in progress; nil when not batching.
+    /// UI uses this to show "正在下载 X / N".
+    @Published var batchProgress: (current: Int, total: Int)? = nil
+
+    /// Active subprocess. Replaced on every new `start` / `startExternal` /
+    /// `runFFmpegFallback` so a previous task's pending `onLine` / `onExit`
+    /// callbacks can be filtered out via `self.runner === runnerRef` and
+    /// don't clobber the new task's state.
+    private var runner: ProcessRunner?
 
     // MARK: - URL helpers
 
@@ -191,23 +217,34 @@ final class DownloaderViewModel: ObservableObject {
             atPath: draft.saveDir, withIntermediateDirectories: true)
 
         status = .running
-        logs.removeAll()
+        if !logs.isEmpty {
+            appendLog("────────────")
+        }
+        appendLog("▶ \(url)")
         startedAt = Date()
         appendLog("$ \(Self.executablePath) \(buildArguments().joined(separator: " "))")
 
-        runner.launch(
+        // Cancel any in-flight subprocess and swap in a fresh runner so
+        // the previous task's onLine/onExit callbacks can be filtered.
+        runner?.cancel()
+        let active = ProcessRunner()
+        self.runner = active
+
+        active.launch(
             executable: Self.executablePath,
             arguments: buildArguments(),
             workingDirectory: draft.saveDir,
             environment: Self.inheritedEnvironment,
-            onLine: { [weak self] line, isErr in
+            onLine: { [weak self, runnerRef = active] line, isErr in
                 Task { @MainActor in
-                    self?.appendLog(isErr ? line : line, isErr: isErr)
+                    guard let self, self.runner === runnerRef else { return }
+                    self.appendLog(isErr ? line : line, isErr: isErr)
                 }
             },
-            onExit: { [weak self] code, err in
+            onExit: { [weak self, runnerRef = active] code, err in
                 Task { @MainActor in
-                    guard let self else { return }
+                    guard let self, self.runner === runnerRef else { return }
+                    self.currentProgress = nil
                     let elapsed = self.startedAt.map { Date().timeIntervalSince($0) } ?? 0
                     if let err = err {
                         self.status = .failed(err.localizedDescription)
@@ -244,7 +281,11 @@ final class DownloaderViewModel: ObservableObject {
     }
 
     func cancel() {
-        runner.cancel()
+        // When the user hits "取消" we also want to break out of a batch
+        // download loop (see startBatchExternal).
+        batchProgress = nil
+        currentProgress = nil
+        runner?.cancel()
     }
 
     // MARK: - ffmpeg fallback
@@ -340,32 +381,77 @@ final class DownloaderViewModel: ObservableObject {
         }
 
         // Add _ffmpeg suffix so the file doesn't collide with any partial
-        // output N_m3u8DL-RE may have left behind.
+        // output N_m3u8DL-RE may have left behind. Also append a 6-char
+        // URL-derived suffix so two tasks that happen to share a saveName
+        // (e.g. a batch of independent m3u8s that all hashed to the same
+        // i+1 = 1 because each link has a single variant) still produce
+        // distinct files. abs(hashValue) is fine — collision risk across
+        // ~10s of URLs in one batch is negligible.
         let baseName: String = {
             if req.saveName.isEmpty {
                 return "fallback_\(Self.fileTimestamp.string(from: Date()))"
             }
-            return "\(req.saveName)_ffmpeg"
+            let suffix = String(abs(req.url.hashValue), radix: 16).suffix(6)
+            return "\(req.saveName)_ffmpeg_\(suffix)"
         }()
         let outFile = "\(req.saveDir)/\(baseName).\(ext)"
         args += [outFile]
 
-        appendLog("[fallback] N_m3u8DL-RE 失败,改用 ffmpeg")
         appendLog("$ \(ffmpeg) \(args.joined(separator: " "))")
 
-        runner.launch(
+        // Swap runner so any straggler callbacks from the failed N_m3u8DL-RE
+        // subprocess don't pollute the ffmpeg log.
+        runner?.cancel()
+        let active = ProcessRunner()
+        self.runner = active
+
+        // Holder for state captured by the onLine closure (needs reference
+        // semantics so we can mutate `duration` / `lastPercent` from inside
+        // the closure across calls).
+        let progress = FFmpegProgressState()
+
+        active.launch(
             executable: ffmpeg,
             arguments: args,
             workingDirectory: req.saveDir,
             environment: Self.inheritedEnvironment,
-            onLine: { [weak self] line, isErr in
+            onLine: { [weak self, runnerRef = active, progress] line, isErr in
                 Task { @MainActor in
-                    self?.appendLog(line, isErr: isErr)
+                    guard let self, self.runner === runnerRef else { return }
+                    // 1) Capture source duration as soon as ffmpeg reports it.
+                    //    The Duration line itself is filtered out by
+                    //    shouldFilter (`^Duration:`) — the progress bar
+                    //    shows the duration immediately after.
+                    if progress.duration == nil, let d = Self.parseFFmpegDuration(line) {
+                        progress.duration = d
+                        return
+                    }
+                    // 2) Consume ffmpeg's per-frame progress lines. Render
+                    //    them into a single in-place progress text (anchored
+                    //    row in the UI), NOT into the scrollable log — this
+                    //    keeps the log from being spammed at 30 lines/sec.
+                    if let p = Self.parseFFmpegFrameLine(line) {
+                        if let dur = progress.duration {
+                            let percent = max(0, min(100, Int(p.time / dur * 100)))
+                            if percent != progress.lastPercent {
+                                progress.lastPercent = percent
+                                let bar = Self.makeProgressBar(percent: percent, width: 20)
+                                let timeStr = Self.formatHMS(p.time)
+                                let durStr  = Self.formatHMS(dur)
+                                self.currentProgress =
+                                    "\(bar) \(percent)%  (\(timeStr) / \(durStr))  \(String(format: "%.1fx", p.speed))"
+                            }
+                        }
+                        return  // drop raw `frame=` line
+                    }
+                    // 3) Anything else: pass through unchanged.
+                    self.appendLog(line, isErr: isErr)
                 }
             },
-            onExit: { [weak self] code, err in
+            onExit: { [weak self, runnerRef = active] code, err in
                 Task { @MainActor in
-                    guard let self else { return }
+                    guard let self, self.runner === runnerRef else { return }
+                    self.currentProgress = nil
                     let elapsed = self.startedAt.map { Date().timeIntervalSince($0) } ?? 0
                     if let err = err {
                         self.status = .failed("ffmpeg fallback: \(err.localizedDescription)")
@@ -396,6 +482,93 @@ final class DownloaderViewModel: ObservableObject {
         return true
     }
 
+    // MARK: - ffmpeg progress parsing
+
+    /// Mutable state captured by `runFFmpegFallback`'s onLine closure. Needs
+    /// reference semantics so we can update `duration` / `lastPercent` across
+    /// calls (Swift closure capture of `let` structs wouldn't allow that).
+    fileprivate final class FFmpegProgressState {
+        var duration: TimeInterval?
+        var lastPercent: Int = -1
+    }
+
+    /// Parse a line of ffmpeg stderr for the source `Duration: HH:MM:SS.MS`.
+    /// Returns the duration in seconds, or nil if the line isn't one.
+    private static func parseFFmpegDuration(_ line: String) -> TimeInterval? {
+        guard let r = line.range(of: #"Duration:\s*(\d+):(\d{2}):(\d+\.\d+)"#,
+                                 options: .regularExpression) else { return nil }
+        let s = line[r]
+        // Pull just the time portion. "Duration: " prefix is dropped by the
+        // regex's `\s*`; capture group 0 of the first match is the whole
+        // "HH:MM:SS.MS" chunk.
+        let colonParts = s.split(separator: " ")
+        guard let last = colonParts.last else { return nil }
+        let hms = last.split(separator: ":")
+        guard hms.count == 3,
+              let h = Double(hms[0]),
+              let m = Double(hms[1]),
+              let sec = Double(hms[2]) else { return nil }
+        return h * 3600 + m * 60 + sec
+    }
+
+    /// Parse a ffmpeg per-frame progress line. Returns (current time in
+    /// seconds, encoding speed multiplier) or nil if it isn't one. Lines
+    /// look like:
+    ///   `frame=  150 fps=0.0 size=    1024KiB time=00:00:05.92 bitrate=... speed=11.7x elapsed=...`
+    private static func parseFFmpegFrameLine(_ line: String) -> (time: TimeInterval, speed: Double)? {
+        let head = line.trimmingCharacters(in: .whitespaces)
+        guard head.hasPrefix("frame=") else { return nil }
+
+        var time: TimeInterval?
+        if let r = line.range(of: #"time=(\d+):(\d{2}):(\d+\.\d+)"#, options: .regularExpression) {
+            let token = String(line[r]).replacingOccurrences(of: "time=", with: "")
+            let p = token.split(separator: ":")
+            if p.count == 3,
+               let h = Double(p[0]),
+               let m = Double(p[1]),
+               let s = Double(p[2]) {
+                time = h * 3600 + m * 60 + s
+            }
+        }
+
+        var speed: Double = 1
+        if let r = line.range(of: #"speed=([\d.]+)x"#, options: .regularExpression) {
+            let token = String(line[r])
+            // token is like "speed=11.7x"; strip both ends.
+            let stripped = token
+                .replacingOccurrences(of: "speed=", with: "")
+                .replacingOccurrences(of: "x", with: "")
+            speed = Double(stripped) ?? 1
+        }
+
+        if let t = time { return (t, speed) }
+        return nil
+    }
+
+    /// Render an ASCII progress bar. `width` is the total character count
+    /// (including the brackets). Filled block: █ ; empty: ░ .
+    private static func makeProgressBar(percent: Int, width: Int) -> String {
+        let clamped = max(0, min(100, percent))
+        // -2 for the brackets
+        let inner = max(0, width - 2)
+        let filled = clamped * inner / 100
+        let empty = inner - filled
+        return "[" + String(repeating: "█", count: filled)
+                   + String(repeating: "░", count: empty) + "]"
+    }
+
+    /// Format seconds as `H:MM:SS` or `M:SS`.
+    private static func formatHMS(_ sec: TimeInterval) -> String {
+        let total = Int(sec.rounded())
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        if h > 0 {
+            return String(format: "%d:%02d:%02d", h, m, s)
+        }
+        return String(format: "%d:%02d", m, s)
+    }
+
     // MARK: - External handoff (used by BrowserView)
 
     /// Run a download with explicit parameters, independent of `draft`.
@@ -407,7 +580,7 @@ final class DownloaderViewModel: ObservableObject {
                        threads: Int = 12,
                        format: OutputFormat = .mp4) {
         // Reset any in-flight task first.
-        if case .running = status { runner.cancel() }
+        if case .running = status { runner?.cancel() }
 
         let u = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !u.isEmpty else {
@@ -435,24 +608,44 @@ final class DownloaderViewModel: ObservableObject {
         }
         appendFFmpeg(&args)
 
+        // Cancel any in-flight subprocess and swap in a fresh runner so
+        // the previous task's onLine/onExit callbacks get filtered out via
+        // `self.runner === runnerRef` and don't clobber the new state.
+        runner?.cancel()
+        let active = ProcessRunner()
+        self.runner = active
+
         status = .running
-        logs.removeAll()
+        // NOTE: do NOT logs.removeAll() — a batch download streams multiple
+        // tasks through the same VM and we want to see the per-task history.
+        // Each launch appends a divider line below for readability.
+        // In batch mode, startBatchExternal already printed the per-item
+        // header line ("▶ 批量 [X / N]  <url>") before calling us, so we
+        // skip the per-task header here to avoid duplication.
+        if !logs.isEmpty {
+            appendLog("────────────")
+        }
+        if batchProgress == nil {
+            appendLog("▶ \(saveName.isEmpty ? u : saveName)")
+        }
         startedAt = Date()
         appendLog("$ \(Self.executablePath) \(args.joined(separator: " "))")
 
-        runner.launch(
+        active.launch(
             executable: Self.executablePath,
             arguments: args,
             workingDirectory: dir,
             environment: Self.inheritedEnvironment,
-            onLine: { [weak self] line, isErr in
+            onLine: { [weak self, runnerRef = active] line, isErr in
                 Task { @MainActor in
-                    self?.appendLog(isErr ? line : line, isErr: isErr)
+                    guard let self, self.runner === runnerRef else { return }
+                    self.appendLog(isErr ? line : line, isErr: isErr)
                 }
             },
-            onExit: { [weak self] code, err in
+            onExit: { [weak self, runnerRef = active] code, err in
                 Task { @MainActor in
-                    guard let self else { return }
+                    guard let self, self.runner === runnerRef else { return }
+                    self.currentProgress = nil
                     let elapsed = self.startedAt.map { Date().timeIntervalSince($0) } ?? 0
                     if let err = err {
                         self.status = .failed(err.localizedDescription)
@@ -488,7 +681,70 @@ final class DownloaderViewModel: ObservableObject {
             })
     }
 
+    // MARK: - Batch download
+
+    /// Run a list of downloads serially. Each item kicks off `startExternal`
+    /// and we wait for `status` to leave `.running` before starting the next.
+    /// `batchProgress` is published so the footer can show "正在下载 X / N".
+    ///
+    /// The old behaviour was to launch them in parallel from `BrowserView`
+    /// with 50ms spacing. That relied on the single shared `ProcessRunner`
+    /// not cancelling its predecessor — which it did — so only the *last*
+    /// launched download ever finished. This is the fix.
+    func startBatchExternal(items: [(url: String, name: String)],
+                            saveDir: String,
+                            extraHeaders: @escaping (String) -> [String]) {
+        guard !items.isEmpty else { return }
+        // If something is already running, cancel it cleanly first; the
+        // await loop below would never make progress otherwise.
+        runner?.cancel()
+        batchProgress = (current: 0, total: items.count)
+
+        Task { @MainActor in
+            for (i, item) in items.enumerated() {
+                if batchProgress == nil {
+                    // User hit "取消" while we were between tasks.
+                    appendLog("[批量] 已取消 (完成 \(i) / \(items.count))")
+                    return
+                }
+                batchProgress = (current: i + 1, total: items.count)
+                let headers = extraHeaders(item.url)
+                // Batch mode: use the global batch index as the save name
+                // (1, 2, 3, …) so the user gets a tidy, easy-to-count
+                // sequence of files. The per-URL `name` from downloadPayload
+                // (with its urlKey / host prefix) is still useful for the
+                // log line, but we don't pass it to startExternal because
+                // the host/key portion is redundant when every file is
+                // numbered in order. The ffmpeg fallback still appends a
+                // short URL-hash suffix as belt-and-braces.
+                appendLog("▶ 批量 [\(i + 1) / \(items.count)]  \(item.url)")
+                startExternal(
+                    url: item.url,
+                    saveName: String(i + 1),
+                    saveDir: saveDir,
+                    extraHeaders: headers
+                )
+                // Wait until the current subprocess actually exits (success,
+                // fail, cancel, or fallback that completes). Fallback also
+                // finishes by flipping `status` out of `.running`, so a plain
+                // status-poll is enough.
+                while case .running = status {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+            }
+            batchProgress = nil
+            appendLog("[批量] 全部完成 (\(items.count) 个)")
+        }
+    }
+
     // MARK: - Logging
+
+    /// External appendLog (used by BrowserView for one-off diagnostic lines,
+    /// e.g. "about to start batch of N items"). Same filter / ANSI-strip
+    /// pipeline as the private one below.
+    func appendLogExternal(_ text: String) {
+        appendLog(text)
+    }
 
     private func appendLog(_ text: String, isErr: Bool = false) {
         if Self.shouldFilter(text) { return }
@@ -498,12 +754,15 @@ final class DownloaderViewModel: ObservableObject {
         if logs.count > 5000 { logs.removeFirst(logs.count - 5000) }
     }
 
-    /// Drop lines that don't carry actionable info — ffmpeg startup banner,
-    /// stream / input / output / mapping descriptions, per-segment "Opening
-    /// 'xxx.ts' for reading" chatter, and N_m3u8DL-RE's empty status lines
-    /// (just "INFO :" with no body, or stderr timestamps with no payload).
-    /// Errors, progress frames, our explicit ✓/✗ summary lines, and ffmpeg's
-    /// final mux summary (`video:...kB audio:...kB`) are all kept.
+    /// Drop lines that don't carry actionable info. Per-item log goes from
+    /// ~70 lines to ~10 with these in place. Kept (visible to user):
+    ///   • our explicit ✓/✗/[fallback] summary lines
+    ///   • the actual command lines ("$ N_m3u8DL-RE ..." / "$ ffmpeg ...")
+    ///   • ffmpeg's final mux summary (`video:...KiB audio:...KiB ...`)
+    ///   • anything that looks like a real error (e.g. ffmpeg's `[error]`).
+    ///
+    /// `head` is `line` with leading/trailing whitespace stripped, so the
+    /// regex patterns don't need a leading `\s+` — that was a previous bug.
     private static func shouldFilter(_ line: String) -> Bool {
         let head = line.trimmingCharacters(in: .whitespaces)
         if head.isEmpty { return true }
@@ -513,29 +772,97 @@ final class DownloaderViewModel: ObservableObject {
                       options: .regularExpression) != nil {
             return true
         }
-        // N_m3u8DL-RE empty bracketed lines: "INFO :", "WARN :", etc.
-        if head.range(of: #"^(INFO|WARN|STATUS|ERROR|DEBUG|TIP)\s*:\s*$"#,
+        // N_m3u8DL-RE bracketed status lines. All of its prefixes
+        // (INFO / WARN / STATUS / ERROR / DEBUG / TIP) are its own logger's
+        // boilerplate — "加载URL", "内容匹配", "写出meta json",
+        // "你已开启下载完成后混流", "开始下载...Vid Kbps", etc. Same every run
+        // and not actionable; we emit our own ✓/✗/[fallback] summary lines
+        // for status. The unanchored match also catches wrapped/merged
+        // variants like "  : 内容匹配...HH:MM:SS.MMM INFO : 正在解析" where
+        // the prefix appears mid-line after two stdout writes get coalesced
+        // without a newline separator.
+        if head.range(of: #"(INFO|WARN|STATUS|ERROR|DEBUG|TIP)\s*:"#,
                       options: .regularExpression) != nil {
+            return true
+        }
+        // Empty bracketed line: just "INFO" / "WARN" / etc. with no body
+        // and no colon. Same category as above but the regex above requires
+        // a `:`, so this catches the bare-prefix case separately. Also
+        // matches wrapped orphans like "13:11:14.532 INFO" where N_m3u8DL-RE
+        // splits the prefix from its body across two stdout writes.
+        if head.range(of: #"^(\d{2}:\d{2}:\d{2}\.\d{3}\s+)?(INFO|WARN|STATUS|ERROR|DEBUG|TIP)$"#,
+                      options: .regularExpression) != nil {
+            return true
+        }
+        // N_m3u8DL-RE's Spectre.Console progress-bar fragments — when stdout
+        // is a pipe (not a TTY), the in-place `\r`-overwrite rendering
+        // breaks into orphan lines like "Vid" alone, then
+        // "  Kbps | 125 Segments | ~08m18s" on the next line. We don't have
+        // a per-segment progress display so these carry no info.
+        if head == "Vid" { return true }
+        if head.range(of: #"^Kbps\b"#, options: .regularExpression) != nil {
+            return true
+        }
+        // ffmpeg / N_m3u8DL-RE wrap artifacts — when stdout has no terminal
+        // width, long lines get split mid-content and we end up with orphan
+        // continuations like "正在解析媒体信息..." (truncated INFO content),
+        // ": 写出meta json" (continuation of a wrapped WARN line), or
+        // "90k tbn, start 1.480000" (continuation of stream metadata). The
+        // leading ": " form is the easiest reliable signal for "this is the
+        // tail of something already filtered above".
+        if head.range(of: #"^:\s+\S"#, options: .regularExpression) != nil {
+            return true
+        }
+        // Well-known orphan fragments of wrapped lines.
+        let knownOrphans: [String] = [
+            "HTTP Live Streaming",         // tail of "INFO : 内容匹配: HTTP Live Streaming"
+            "正在解析媒体信息...",              // tail of "INFO : 正在解析媒体信息..."
+            "90k tbn, start 1.480000",      // tail of Stream #0:0 ... metadata
+            "25 fps, 25 tbr, 90k tbn"       // tail of Stream #0:0 ... metadata
+        ]
+        if knownOrphans.contains(head) { return true }
+        // N_m3u8DL-RE's Spectre.Console crash stack trace. Same
+        // `List<T>.RemoveRange` out-of-bounds bug every time and not
+        // actionable; we already log "[fallback] N_m3u8DL-RE 退出码 X, 改用
+        // ffmpeg" so the user has context. Frames are a mix of
+        // `System.*` and `Spectre.Console.*` so we match any stack frame.
+        if head.hasPrefix("Unhandled exception.") { return true }
+        if head.hasPrefix("System.ArgumentException:") { return true }
+        if head.range(of: #"^at\s+[A-Z][A-Za-z0-9_.]+(\.|`)"#,
+                      options: .regularExpression) != nil { return true }
+        if head.hasPrefix("--- End of stack trace") { return true }
+        // N_m3u8DL-RE version banner: "N_m3u8DL-RE (Beta version) 20260628"
+        if head.range(of: #"^N_m3u8DL-RE\b"#, options: .regularExpression) != nil {
             return true
         }
 
         // ffmpeg startup banner
         if head.hasPrefix("ffmpeg version") { return true }
-        if head.range(of: #"^\s+(built with|configuration:|libav)"#,
+        if head.range(of: #"^Copyright\s+\(c\)"#,
+                      options: .regularExpression) != nil { return true }
+        if head.range(of: #"^(built with|configuration:|lib\w+)"#,
                       options: .regularExpression) != nil { return true }
 
-        // ffmpeg stream / input / output / mapping descriptions
+        // ffmpeg stream / input / output / mapping / metadata / duration.
+        // Duration is already shown in the progress bar via parseFFmpegDuration,
+        // and the metadata fields are just ffmpeg's verbose playlist dump
+        // (we already know codec/dim/bitrate from N_m3u8DL-RE).
         let ffmpegNoise: [String] = [
             #"^Input #\d+,"#,
-            #"^\s+Duration:"#,
-            #"^\s+Program \d+"#,
-            #"^\s+Metadata:"#,
-            #"^\s+variant_bitrate"#,
-            #"^\s+Stream #\d+:"#,
-            #"^\s+Stream #\d+: -> #\d+:"#,
+            #"^Duration:"#,
+            #"^Program \d+"#,
+            #"^Metadata:"#,
+            #"^variant_bitrate\b"#,
+            #"^Stream #\d+:"#,
+            #"^Stream #\d+: -> #\d+:"#,
+            #"^Stream #\d+$"#,            // wrapped second half of a Stream line
+            #"^:?\d+\(und\):"#,           // wrapped ":0(und): Audio: ..." continuation
+            #"^:\d+: Video:"#,            // wrapped ":0: Video: ..." continuation
+            #"^:\d+\[0x[0-9a-fA-F]+\]:"#, // wrapped ":0[0x0]: Video: ..." continuation
+            #"^\d+ fps,"#,                // wrapped "25 fps, 25 tbr, 90k tbn" tail
             #"^Stream mapping:"#,
             #"^Output #\d+,"#,
-            #"^\s+encoder\s+:"#,
+            #"^encoder\s+:"#,
             #"^Press \[q\]"#
         ]
         for pat in ffmpegNoise {
@@ -543,8 +870,13 @@ final class DownloaderViewModel: ObservableObject {
         }
 
         // ffmpeg per-segment HTTP chatter — one line per .ts file opened.
-        if head.range(of: #"^\[(https|hls|http) @ 0x[a-fA-F0-9]+\] Opening"#,
-                      options: .regularExpression) != nil { return true }
+        // Pattern: "[<tag> #N @ 0xADDR] Opening '...ts' for reading" or
+        // "[<tag>#N @ 0xADDR]" (no space). Final mux summary uses the
+        // similar "[out#0/mp4 @ 0xADDR] video:..." form, but the "Opening"
+        // tail is unique to the segment-opening chatter.
+        if head.range(of: #"\]\s+Opening\s+'"#, options: .regularExpression) != nil {
+            return true
+        }
 
         return false
     }
