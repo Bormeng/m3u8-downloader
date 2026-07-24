@@ -59,3 +59,8 @@
   `ipad` / `desktopcomputer` 图标按钮);切完会自动 reload 当前页,
   持久化。理由:很多视频站点桌面版 player 更复杂、m3u8 难抓,iPad 版
   HTML5 player 通常更直白
+- 内嵌浏览器登录态持久化(`WebBrowserView` 用
+  `WKWebsiteDataStore.default()`,而不是默认的 `nonPersistent()`);
+  cookies / localStorage / IndexedDB 落在
+  `~/Library/WebKit/local.m3u8downloader/`,关 App 不丢。导航栏右侧
+  `trash` 按钮清空全部网站数据(带确认弹窗,误点会登出所有已登录站)

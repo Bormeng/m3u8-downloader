@@ -211,6 +211,26 @@ final class BrowserViewModel: ObservableObject {
         wv.reload()
     }
 
+    /// Wipe all website data (cookies, localStorage, IndexedDB, caches) for
+    /// the embedded WKWebView. Use when a site has wedged itself in a bad
+    /// state and the user wants to re-login from scratch. Persistence is
+    /// enabled at the WKWebViewConfiguration level (see WebBrowserView), so
+    /// the data is actually on disk under ~/Library/WebKit/<bundle-id>/ and
+    /// this is the only way to get it back out short of `rm -rf` from a
+    /// shell. After clearing, reloads the current page so the user sees the
+    /// fresh (logged-out) state right away.
+    func clearAllWebsiteData() {
+        guard let wv = webView else { return }
+        let store = wv.configuration.websiteDataStore
+        let allTypes = WKWebsiteDataStore.allWebsiteDataTypes()
+        let since = Date(timeIntervalSince1970: 0)   // everything
+        store.removeData(ofTypes: allTypes, modifiedSince: since) { [weak self] in
+            DispatchQueue.main.async {
+                self?.webView?.reload()
+            }
+        }
+    }
+
     /// Handle a set of m3u8 URLs discovered by the embedded browser.
     /// - If the loaded page is itself an .m3u8, it's added directly.
     /// - Otherwise, the discovered URLs are added with `referer` set to the

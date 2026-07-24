@@ -117,6 +117,28 @@ struct BrowserView: View {
                 .help(vm.useIPadUA
                       ? "当前:iPad UA(点击切回桌面)"
                       : "当前:桌面 UA(点击切到 iPad)")
+
+                // ── Clear website data ──────────────────────────────────
+                // Wipes cookies / localStorage / IndexedDB / caches so the
+                // user can re-login from scratch. Confirmation prompt first
+                // — a stray click would log them out of everything.
+                Button {
+                    let alert = NSAlert()
+                    alert.messageText = "清除浏览器数据?"
+                    alert.informativeText = "会登出所有已登录网站、清除 localStorage、IndexedDB 和缓存。当前页面会刷新。\n\n数据存在 ~/Library/WebKit/local.m3u8downloader/。"
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "清除")
+                    alert.addButton(withTitle: "取消")
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        vm.clearAllWebsiteData()
+                    }
+                } label: {
+                    Image(systemName: "trash")
+                        .foregroundStyle(.secondary)
+                        .imageScale(.medium)
+                }
+                .buttonStyle(.plain)
+                .help("清除 cookies / localStorage / 缓存(登出所有已登录网站)")
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)

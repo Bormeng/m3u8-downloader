@@ -19,6 +19,12 @@ struct WebBrowserView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
+        // Persist cookies / localStorage / IndexedDB / caches across launches
+        // so the user doesn't have to re-login every time they open the app.
+        // WKWebView's default since iOS 13 / macOS privacy hardening is
+        // non-persistent; switch to the shared on-disk store explicitly.
+        // Data lands at ~/Library/WebKit/<bundle-id>/.
+        cfg.websiteDataStore = .default()
         cfg.defaultWebpagePreferences.allowsContentJavaScript = true
         if #available(macOS 11.0, *) {
             cfg.defaultWebpagePreferences.preferredContentMode = .desktop
