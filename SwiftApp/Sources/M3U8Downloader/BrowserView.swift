@@ -99,46 +99,6 @@ struct BrowserView: View {
                 if vm.isBrowserLoading {
                     ProgressView().controlSize(.small)
                 }
-
-                // ── iPad UA toggle ──────────────────────────────────────
-                // Many sites serve a simpler HTML5 player on the iPad layout,
-                // and the m3u8 source is often easier to discover there both
-                // for our JSExtractor and for site-side UA gating. Click to
-                // flip; the page reloads under the new UA. State persists
-                // across launches via BrowserViewModel.useIPadUA.
-                Button {
-                    vm.setUseIPadUA(!vm.useIPadUA)
-                } label: {
-                    Image(systemName: vm.useIPadUA ? "ipad" : "desktopcomputer")
-                        .foregroundStyle(vm.useIPadUA ? Color.accentColor : .secondary)
-                        .imageScale(.medium)
-                }
-                .buttonStyle(.plain)
-                .help(vm.useIPadUA
-                      ? "当前:iPad UA(点击切回桌面)"
-                      : "当前:桌面 UA(点击切到 iPad)")
-
-                // ── Clear website data ──────────────────────────────────
-                // Wipes cookies / localStorage / IndexedDB / caches so the
-                // user can re-login from scratch. Confirmation prompt first
-                // — a stray click would log them out of everything.
-                Button {
-                    let alert = NSAlert()
-                    alert.messageText = "清除浏览器数据?"
-                    alert.informativeText = "会登出所有已登录网站、清除 localStorage、IndexedDB 和缓存。当前页面会刷新。\n\n数据存在 ~/Library/WebKit/local.m3u8downloader/。"
-                    alert.alertStyle = .warning
-                    alert.addButton(withTitle: "清除")
-                    alert.addButton(withTitle: "取消")
-                    if alert.runModal() == .alertFirstButtonReturn {
-                        vm.clearAllWebsiteData()
-                    }
-                } label: {
-                    Image(systemName: "trash")
-                        .foregroundStyle(.secondary)
-                        .imageScale(.medium)
-                }
-                .buttonStyle(.plain)
-                .help("清除 cookies / localStorage / 缓存(登出所有已登录网站)")
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
@@ -375,6 +335,49 @@ struct BrowserView: View {
             } label: {
                 Label("直接粘贴 m3u8 链接", systemImage: "doc.text.magnifyingglass")
                     .font(.callout.weight(.semibold))
+            }
+
+            // ── 浏览器请求(常驻小面板)────────────────────────────
+            // 跟"HTTP 请求头"语义对位:都是"要发给 server 的内容",
+            // 放在一起内聚一些。左 nav bar 干净点(只留导航/URL)。
+            // iPad UA 默认 true(changelogs/2026-07-24),切完自动
+            // reload 当前页(didSet 触发);Clear 按钮带 NSAlert 确认。
+            VStack(alignment: .leading, spacing: 6) {
+                Label("浏览器请求", systemImage: "globe")
+                    .font(.callout.weight(.semibold))
+                HStack(spacing: 12) {
+                    HStack(spacing: 6) {
+                        Text("UA")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Picker("", selection: $vm.useIPadUA) {
+                            Text("桌面").tag(false)
+                            Text("iPad").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 140)
+                        .help("切换浏览器 User-Agent。切完自动 reload 当前页。")
+                    }
+                    Spacer()
+                    Button {
+                        let alert = NSAlert()
+                        alert.messageText = "清除浏览器数据?"
+                        alert.informativeText = "会登出所有已登录网站、清除 localStorage、IndexedDB 和缓存。当前页面会刷新。\n\n数据存在 ~/Library/WebKit/local.m3u8downloader/。"
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "清除")
+                        alert.addButton(withTitle: "取消")
+                        if alert.runModal() == .alertFirstButtonReturn {
+                            vm.clearAllWebsiteData()
+                        }
+                    } label: {
+                        Label("清除数据", systemImage: "trash")
+                            .font(.caption)
+                    }
+                    .help("清除 cookies / localStorage / 缓存(登出所有已登录网站)")
+                }
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.25)))
             }
 
             DisclosureGroup(isExpanded: $showHeaders) {

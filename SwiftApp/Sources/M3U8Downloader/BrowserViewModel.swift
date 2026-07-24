@@ -98,6 +98,11 @@ final class BrowserViewModel: ObservableObject {
     /// tablet tier, with the m3u8 source more exposed to JSExtractor. Only
     /// applies when the key is missing in UserDefaults — users who have
     /// already toggled to desktop keep their stored `false` value.
+    ///
+    /// Bound directly by the right-panel `Picker` (no `setUseIPadUA`
+    /// wrapper), so `didSet` is the single funnel for: persist to
+    /// UserDefaults + push the new UA into the live WKWebView + reload the
+    /// current page so the next request actually goes out under the new UA.
     @Published var useIPadUA: Bool = {
         if defaults.object(forKey: DefaultsKey.useIPadUA) == nil { return true }
         return defaults.bool(forKey: DefaultsKey.useIPadUA)
@@ -105,6 +110,16 @@ final class BrowserViewModel: ObservableObject {
         didSet {
             guard useIPadUA != oldValue else { return }
             Self.defaults.set(useIPadUA, forKey: DefaultsKey.useIPadUA)
+            // Sync the live webview if it exists. The webview's
+            // customUserAgent is also set at creation time in makeNSView
+            // — that covers the initial cold-start case. didSet covers
+            // all subsequent runtime changes (right-panel UA picker,
+            // any future programmatic toggle). Skip reload if no page
+            // is loaded — there's nothing to refresh.
+            if let wv = webView, wv.url != nil {
+                wv.customUserAgent = useIPadUA ? Self.iPadUserAgent : nil
+                wv.reload()
+            }
         }
     }
 
@@ -196,20 +211,6 @@ final class BrowserViewModel: ObservableObject {
     func browserGoForward() { webView?.goForward() }
     func browserReload()    { webView?.reload() }
     func browserStop()      { webView?.stopLoading() }
-
-    /// Flip the iPad User-Agent mode and, if a page is currently loaded,
-    /// reload it so the new UA goes out on the next request. Setting
-    /// `customUserAgent` on an existing WKWebView affects subsequent loads
-    /// only — the in-flight page still carries the old UA — so a reload
-    /// is the simplest way to make the change visible to the user.
-    /// No-op when the value already matches.
-    func setUseIPadUA(_ enabled: Bool) {
-        guard enabled != useIPadUA else { return }
-        useIPadUA = enabled
-        guard let wv = webView, wv.url != nil else { return }
-        wv.customUserAgent = enabled ? Self.iPadUserAgent : nil
-        wv.reload()
-    }
 
     /// Wipe all website data (cookies, localStorage, IndexedDB, caches) for
     /// the embedded WKWebView. Use when a site has wedged itself in a bad
