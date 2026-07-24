@@ -7,6 +7,7 @@
 
 # Mavis / tooling
 .minimax/
+.workbuddy/
 
 # SwiftPM
 *.xcodeproj/
@@ -14,5 +15,7 @@
 Package.resolved
 /SwiftApp/.build/
 
-# N_m3u8DL-RE download residue (incomplete .ts fragments)
+# N_m3u8DL-RE download residue (incomplete .ts fragments + per-run
+# output dirs left over from manual validation runs)
 /tests/**/*.ts.tmp
+/tty2/
