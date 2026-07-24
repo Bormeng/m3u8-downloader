@@ -185,18 +185,16 @@ struct BrowserView: View {
     private var resultsPane: some View {
         VStack(spacing: 0) {
             // ── Top: input controls (paste m3u8 + 浏览器设置) ──
-            // Capped at 360pt and wrapped in a ScrollView so the panel
-            // scrolls internally when the window is short, instead of the
-            // upper content being squeezed/clipped by the `emptyState`
-            // below (which declares maxHeight: .infinity and can otherwise
-            // push the top of the inputControlsPanel out of view — that's
-            // the "直接粘贴 m3u8 链接" DisclosureGroup disappearing when
-            // the app is shrunk).
-            ScrollView {
-                inputControlsPanel
-            }
-            .frame(maxHeight: 360)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
+            // layoutPriority(1) 让 VStack 在跟下面 emptyState (maxHeight:
+            // .infinity) 抢空间时,优先保证 inputControlsPanel 的自然高度
+            // —— 否则窗口缩到一定高度时,emptyState 会把面板压扁,导致
+            // "直接粘贴 m3u8 链接" 整个被推出可视区。
+            // 注意:之前我试过 ScrollView{maxHeight:360},会把整个面板
+            // 钉在 360pt,即使两个 DisclosureGroup 都折叠也会留一大块
+            // 空白 —— layoutPriority 这个更轻,只确保面板不被压扁。
+            inputControlsPanel
+                .layoutPriority(1)
+                .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
 
             Divider()
 
