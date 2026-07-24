@@ -39,9 +39,10 @@ struct BrowserView: View {
 
             HSplitView {
                 inputPane
-                    .frame(minWidth: 460, idealWidth: 540)
+                    .frame(minWidth: 460, idealWidth: 720)
+                    .background(HSplitInitialDivider(fraction: 2.0 / 3.0))
                 resultsPane
-                    .frame(minWidth: 460)
+                    .frame(minWidth: 460, idealWidth: 360)
             }
         }
         .background(
@@ -688,6 +689,76 @@ private struct WindowAccessor: NSViewRepresentable {
         DispatchQueue.main.async { [weak nsView] in
             onResolve(nsView?.window)
         }
+    }
+}
+
+// MARK: - Initial HSplitView divider pinner
+//
+// SwiftUI's `HSplitView` wraps AppKit's `NSSplitView`, which auto-positions
+// its divider roughly at the centre when no autosave / explicit position
+// is configured. We want a 2/3-vs-1/3 starting ratio on every launch
+// (without autosaving the user's drag), and HSplitView has no
+// divider-position modifier, so we bridge into AppKit: drop a tiny
+// NSViewRepresentable inside the split, walk up to the nearest
+// NSSplitView, and call `setPosition(_:ofDividerAt:)` once the bounds
+// have a non-zero width.
+//
+// `didApply` is intentionally a one-shot — re-applying on every layout
+// pass would yank the divider back every time the window resized.
+
+private final class HSplitDividerPinnerView: NSView {
+    let fraction: CGFloat
+    private var didApply = false
+
+    init(fraction: CGFloat) {
+        self.fraction = fraction
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyIfReady()
+    }
+
+    override func layout() {
+        super.layout()
+        applyIfReady()
+    }
+
+    private func applyIfReady() {
+        guard !didApply else { return }
+        var current: NSView? = superview
+        while let parent = current {
+            if let split = parent as? NSSplitView, split.bounds.width > 0 {
+                let target = split.bounds.width * fraction
+                // NSSplitView's setPosition takes the divider's leading
+                // edge coordinate. Clamp so a sudden window shrink can't
+                // violate the panes' minWidths (NSSplitView would clamp
+                // anyway, but doing it here avoids a no-op write + log).
+                let clamped = min(
+                    max(target, 0),
+                    max(0, split.bounds.width - 1)
+                )
+                split.setPosition(clamped, ofDividerAt: 0)
+                didApply = true
+                return
+            }
+            current = parent.superview
+        }
+    }
+}
+
+private struct HSplitInitialDivider: NSViewRepresentable {
+    let fraction: CGFloat
+
+    func makeNSView(context: Context) -> NSView {
+        HSplitDividerPinnerView(fraction: fraction)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        // The pinner view is self-contained; nothing to push down here.
     }
 }
 
