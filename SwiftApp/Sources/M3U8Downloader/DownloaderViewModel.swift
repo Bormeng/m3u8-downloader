@@ -187,6 +187,23 @@ final class DownloaderViewModel: ObservableObject {
         case .ts:  break
         }
         if draft.livePerformAsVOD { args += ["--live-perform-as-vod"] }
+        // ── Hardening for GUI-app child-process mode ─────────────────────────
+        // We invoke N_m3u8DL-RE inside a PTY (ProcessRunner.pseudoterminal),
+        // so from the child's perspective stdout IS a TTY and Spectre.Console
+        // takes its interactive code path instead of the "redirected pipe"
+        // path that races into a SIGABRT. With the PTY in place the binary
+        // needs only minor cleanup:
+        //   --disable-update-check  : skip the fire-and-forget GitHub check
+        //                            in the child, no value to us.
+        //   --no-ansi-color        : we strip ANSI ourselves in
+        //                            strippingAnsi; turning it off at source
+        //                            makes per-line parsing saner when N_m3u8DL-RE
+        //                            is wrapped in `script` and the terminal
+        //                            echo adds control chars.
+        //   --no-log               : don't write N_m3u8DL-RE's logs.txt into
+        //                            saveDir — the GUI app's log pane IS our
+        //                            log surface.
+        args += ["--disable-update-check", "--no-ansi-color", "--no-log"]
         appendFFmpeg(&args)
         return args
     }
@@ -235,6 +252,12 @@ final class DownloaderViewModel: ObservableObject {
             arguments: buildArguments(),
             workingDirectory: draft.saveDir,
             environment: Self.inheritedEnvironment,
+            // Wrap N_m3u8DL-RE in a PTY so Spectre.Console takes the
+            // interactive-terminal code path; otherwise its
+            // ProgressRefreshThread races into a SIGABRT under our Pipe
+            // stdout. ffmpeg fallback (runFFmpegFallback) does NOT use
+            // this — ffmpeg is a plain C binary with no such issue.
+            pseudoterminal: true,
             onLine: { [weak self, runnerRef = active] line, isErr in
                 Task { @MainActor in
                     guard let self, self.runner === runnerRef else { return }
@@ -601,6 +624,9 @@ final class DownloaderViewModel: ObservableObject {
             args += ["-H", h]
         }
         args += ["--thread-count", String(threads), "--auto-select"]
+        // Same child-process hardening as buildArguments() — see the long
+        // comment there for the Spectre.Console SIGABRT rationale.
+        args += ["--disable-update-check", "--no-ansi-color", "--no-log"]
         switch format {
         case .mp4: args += ["-M", "format=mp4"]
         case .mkv: args += ["-M", "format=mkv"]
@@ -636,6 +662,8 @@ final class DownloaderViewModel: ObservableObject {
             arguments: args,
             workingDirectory: dir,
             environment: Self.inheritedEnvironment,
+            // Same PTY rationale as in start() — see the comment there.
+            pseudoterminal: true,
             onLine: { [weak self, runnerRef = active] line, isErr in
                 Task { @MainActor in
                     guard let self, self.runner === runnerRef else { return }
