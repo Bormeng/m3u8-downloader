@@ -11,7 +11,7 @@ struct BrowserView: View {
     @EnvironmentObject var downloader: DownloaderViewModel
     @EnvironmentObject var playerVM: PlayerViewModel
     @State private var showDirectInput: Bool = false
-    @State private var showHeaders: Bool = false
+    @State private var showBrowserSettings: Bool = false
     @State private var logCollapsed: Bool = true
     @State private var isWindowFullscreen: Bool = false
     @FocusState private var urlFieldFocused: Bool
@@ -337,82 +337,94 @@ struct BrowserView: View {
                     .font(.callout.weight(.semibold))
             }
 
-            // ── 浏览器请求(常驻小面板)────────────────────────────
-            // 跟"HTTP 请求头"语义对位:都是"要发给 server 的内容",
-            // 放在一起内聚一些。左 nav bar 干净点(只留导航/URL)。
+            // ── 浏览器设置(默认折叠)────────────────────────────
+            // 三个子区块:UA 头 / 清理缓存 / HTTP 请求头(可选)。
+            // 都属于"要发给 server 的内容"或"对 server 请求的相关设置",
+            // 集中管理;默认收起,避免右侧初始时太挤。
             // iPad UA 默认 true(changelogs/2026-07-24),切完自动
             // reload 当前页(didSet 触发);Clear 按钮带 NSAlert 确认。
-            VStack(alignment: .leading, spacing: 6) {
-                Label("浏览器请求", systemImage: "globe")
-                    .font(.callout.weight(.semibold))
-                HStack(spacing: 12) {
-                    HStack(spacing: 6) {
-                        Text("UA")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Picker("", selection: $vm.useIPadUA) {
-                            Text("桌面").tag(false)
-                            Text("iPad").tag(true)
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .frame(width: 140)
-                        .help("切换浏览器 User-Agent。切完自动 reload 当前页。")
-                    }
-                    Spacer()
-                    Button {
-                        let alert = NSAlert()
-                        alert.messageText = "清除浏览器数据?"
-                        alert.informativeText = "会登出所有已登录网站、清除 localStorage、IndexedDB 和缓存。当前页面会刷新。\n\n数据存在 ~/Library/WebKit/local.m3u8downloader/。"
-                        alert.alertStyle = .warning
-                        alert.addButton(withTitle: "清除")
-                        alert.addButton(withTitle: "取消")
-                        if alert.runModal() == .alertFirstButtonReturn {
-                            vm.clearAllWebsiteData()
-                        }
-                    } label: {
-                        Label("清除数据", systemImage: "trash")
-                            .font(.caption)
-                    }
-                    .help("清除 cookies / localStorage / 缓存(登出所有已登录网站)")
-                }
-                .padding(8)
-                .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.25)))
-            }
-
-            DisclosureGroup(isExpanded: $showHeaders) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        TextField("Cookie: xxx", text: $vm.headerInput)
-                            .textFieldStyle(.roundedBorder)
-                            .onSubmit { vm.addHeader() }
-                        Button("添加") { vm.addHeader() }
-                    }
-                    if vm.headers.isEmpty {
-                        Text("（无）").font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(vm.headers, id: \.self) { h in
-                                HStack {
-                                    Text(h)
-                                        .font(.system(.caption, design: .monospaced))
-                                        .lineLimit(1).truncationMode(.middle)
-                                    Spacer()
-                                    Button {
-                                        vm.removeHeader(h)
-                                    } label: { Image(systemName: "minus.circle") }
-                                        .buttonStyle(.plain)
-                                        .foregroundStyle(.secondary)
-                                }
+            DisclosureGroup(isExpanded: $showBrowserSettings) {
+                VStack(alignment: .leading, spacing: 10) {
+                    // 子区 1:UA 头
+                    VStack(alignment: .leading, spacing: 6) {
+                        sectionTitle("UA 头")
+                        HStack(spacing: 6) {
+                            Picker("", selection: $vm.useIPadUA) {
+                                Text("桌面").tag(false)
+                                Text("iPad").tag(true)
                             }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .frame(width: 160)
+                            .help("切换浏览器 User-Agent。切完自动 reload 当前页。")
                         }
                         .padding(8)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.4)))
+                        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.25)))
+                    }
+
+                    // 子区 2:清理缓存
+                    VStack(alignment: .leading, spacing: 6) {
+                        sectionTitle("清理缓存")
+                        HStack {
+                            Text("cookies / localStorage / IndexedDB / 缓存")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .lineLimit(2)
+                            Spacer()
+                            Button {
+                                let alert = NSAlert()
+                                alert.messageText = "清除浏览器数据?"
+                                alert.informativeText = "会登出所有已登录网站、清除 localStorage、IndexedDB 和缓存。当前页面会刷新。\n\n数据存在 ~/Library/WebKit/local.m3u8downloader/。"
+                                alert.alertStyle = .warning
+                                alert.addButton(withTitle: "清除")
+                                alert.addButton(withTitle: "取消")
+                                if alert.runModal() == .alertFirstButtonReturn {
+                                    vm.clearAllWebsiteData()
+                                }
+                            } label: {
+                                Label("清除数据", systemImage: "trash")
+                                    .font(.caption)
+                            }
+                            .help("清除 cookies / localStorage / 缓存(登出所有已登录网站)")
+                        }
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.25)))
+                    }
+
+                    // 子区 3:HTTP 请求头(可选)
+                    VStack(alignment: .leading, spacing: 6) {
+                        sectionTitle("HTTP 请求头（可选）")
+                        HStack {
+                            TextField("Cookie: xxx", text: $vm.headerInput)
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit { vm.addHeader() }
+                            Button("添加") { vm.addHeader() }
+                        }
+                        if vm.headers.isEmpty {
+                            Text("（无）").font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(vm.headers, id: \.self) { h in
+                                    HStack {
+                                        Text(h)
+                                            .font(.system(.caption, design: .monospaced))
+                                            .lineLimit(1).truncationMode(.middle)
+                                        Spacer()
+                                        Button {
+                                            vm.removeHeader(h)
+                                        } label: { Image(systemName: "minus.circle") }
+                                            .buttonStyle(.plain)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .padding(8)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.4)))
+                        }
                     }
                 }
                 .padding(.top, 4)
             } label: {
-                Label("HTTP 请求头（可选）", systemImage: "list.bullet.rectangle")
+                Label("浏览器设置", systemImage: "gearshape")
                     .font(.callout.weight(.semibold))
             }
         }
