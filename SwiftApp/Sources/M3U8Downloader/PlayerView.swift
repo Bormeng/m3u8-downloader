@@ -293,11 +293,16 @@ struct PlayerView: View {
         }
     }
 
-    // MARK: - Settings toolbar (speed slider + skip back/forward inputs)
+    // MARK: - Settings toolbar (speed slider + skip control + volume control)
 
-    /// 进度条上方的设置工具栏:速度 slider + 两个跨度数字输入框。
+    /// 进度条上方的设置工具栏:速度 slider + (⏪ 跨度输入 ⏩) + 音量控件。
     /// - 速度:0.5x ~ 3x,step 0.5,拖动立即生效
-    /// - 后退 / 前进跨度:1s ~ 30s,数字输入框,提交时持久化
+    /// - 跨度:1s ~ 30s,前进后退共用,数字输入框,提交时持久化;左右两个按钮
+    ///   触发 skipBackward() / skipForward(),视频双击左右半屏也用同一个值
+    /// - 音量:静音按钮 + slider,持久化
+    ///
+    /// 布局:速度 slider 用 .frame(maxWidth: .infinity) 占满剩余宽度,
+    /// 跨度和音量按自然宽度排在右侧,这样窄窗口下速度仍能拿到大部分空间。
     private var settingsToolbar: some View {
         HStack(spacing: 12) {
             sliderField(
@@ -312,23 +317,9 @@ struct PlayerView: View {
             )
             .help("播放速度(0.5x ~ 3x)")
 
-            skipField(
-                label: "后退",
-                value: Binding(
-                    get: { Int(vm.skipBackwardSeconds) },
-                    set: { vm.setSkipBackward(Double($0)) }
-                )
-            )
-            .help("双击视频左半屏的后退跨度(秒)")
+            skipControl
 
-            skipField(
-                label: "前进",
-                value: Binding(
-                    get: { Int(vm.skipForwardSeconds) },
-                    set: { vm.setSkipForward(Double($0)) }
-                )
-            )
-            .help("双击视频右半屏的快进跨度(秒)")
+            volumeControl
         }
         // 视频没就绪时整体灰掉,免得用户拖动但没反应
         .opacity(vm.isReady ? 1.0 : 0.5)
@@ -362,6 +353,9 @@ struct PlayerView: View {
     /// 用 format: .number 限制只能输整数;setter 转 Double 调 vm,vm 内部 clamp
     /// 兜底,越界值自动回收到 [minSkip, maxSkip]。TextField 绑 Int 时,空字符串
     /// 不会触发 set(被 format 拒掉),value 保持不变,所以用户编辑过程中不会丢原值。
+    ///
+    /// 不加 .frame(maxWidth: .infinity) —— 让父 HStack 按自然宽度分配,
+    /// 速度 slider 那个 .frame(maxWidth: .infinity) 才能拿到剩余空间。
     private func skipField(
         label: String,
         value: Binding<Int>
@@ -380,7 +374,74 @@ struct PlayerView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity)
+    }
+
+    /// 前进 / 后退按钮 + 跨度输入框,组合成一个视觉单元:[⏪] [跨度 N s] [⏩]。
+    /// 按钮夹住数值,意图最直观 —— 数字就是按钮的步长。
+    private var skipControl: some View {
+        HStack(spacing: 4) {
+            Button {
+                vm.skipBackward()
+            } label: {
+                Image(systemName: "gobackward")
+                    .frame(width: 16, height: 16)
+            }
+            .buttonStyle(.borderless)
+            .disabled(!vm.isReady || vm.duration <= 0)
+            .help("后退 \(Int(vm.skipSeconds))s")
+
+            skipField(
+                label: "跨度",
+                value: Binding(
+                    get: { Int(vm.skipSeconds) },
+                    set: { vm.setSkipSeconds(Double($0)) }
+                )
+            )
+            .help("前进 / 后退按钮的跨度(秒),视频双击左右半屏也用这个值")
+
+            Button {
+                vm.skipForward()
+            } label: {
+                Image(systemName: "goforward")
+                    .frame(width: 16, height: 16)
+            }
+            .buttonStyle(.borderless)
+            .disabled(!vm.isReady || vm.duration <= 0)
+            .help("前进 \(Int(vm.skipSeconds))s")
+        }
+    }
+
+    /// 工具栏里的音量控件:[静音按钮] [音量 slider]。
+    /// 固定窄宽,排在跨度的右侧。拖 slider 只改 volume,不会自动取消静音。
+    private var volumeControl: some View {
+        HStack(spacing: 4) {
+            Button {
+                vm.setMuted(!vm.isMuted)
+            } label: {
+                Image(systemName: volumeIconName)
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.borderless)
+            .help(vm.isMuted ? "取消静音" : "静音")
+
+            Slider(
+                value: Binding(
+                    get: { Double(vm.volume) },
+                    set: { vm.setVolume(Float($0)) }
+                ),
+                in: 0...1
+            )
+            .frame(width: 90)
+        }
+    }
+
+    /// 根据当前 volume + isMuted 选 SF Symbol,跟 macOS 系统音量菜单一致:
+    /// 0 / 静音 → 斜杠;低 → 单波;中 → 双波;高 → 三波。
+    private var volumeIconName: String {
+        if vm.isMuted || vm.volume == 0 { return "speaker.slash.fill" }
+        if vm.volume < 0.33 { return "speaker.wave.1.fill" }
+        if vm.volume < 0.66 { return "speaker.wave.2.fill" }
+        return "speaker.wave.3.fill"
     }
 
     /// 把 1.0 显示成 "1x"、1.5 显示成 "1.5x"。整数倍省掉小数点。

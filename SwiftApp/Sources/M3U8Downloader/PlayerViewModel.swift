@@ -23,11 +23,11 @@ final class PlayerViewModel: ObservableObject {
     let minRate: Float = 0.5
     let maxRate: Float = 3.0
     let rateStep: Float = 0.5
-    /// 双击快进 / 快退的跨度 slider 的范围 / 步进
+    /// 双击 / 工具栏按钮的跨度 slider 的范围 / 步进
     let minSkip: Double = 1
     let maxSkip: Double = 30
     let skipStep: Double = 1
-    /// 快进 / 快退跨度的默认值(首次启动 / 持久化值越界时用)
+    /// 跨度的默认值(首次启动 / 持久化值越界时用)
     let defaultSkipSeconds: Double = 5
 
     // MARK: - Skip flash HUD
@@ -55,10 +55,13 @@ final class PlayerViewModel: ObservableObject {
     @Published private(set) var skipFlash: SkipFlash?
     /// 当前播放速率(0.5x ~ 3x, step 0.5)。持久化到 UserDefaults,跨会话保留。
     @Published private(set) var playbackRate: Float
-    /// 双击右半屏的快进跨度(秒,1 ~ 30, step 1)。持久化。
-    @Published private(set) var skipForwardSeconds: Double
-    /// 双击左半屏的快退跨度(秒,1 ~ 30, step 1)。持久化。
-    @Published private(set) var skipBackwardSeconds: Double
+    /// 前进 / 后退 / 双击视频左右半屏的跨度(秒,1 ~ 30, step 1)。
+    /// 前进和后退共用一个数值。持久化。
+    @Published private(set) var skipSeconds: Double
+    /// 播放音量(0.0 ~ 1.0)。持久化。和 isMuted 互相独立 —— 拖 slider 不取消静音。
+    @Published private(set) var volume: Float
+    /// 是否静音。持久化。和 volume 互相独立 —— 真实可听音量 = volume × !isMuted。
+    @Published private(set) var isMuted: Bool
 
     // MARK: - Private observers
     //
@@ -76,20 +79,25 @@ final class PlayerViewModel: ObservableObject {
 
     /// UserDefaults key:持久化用户选的播放速率
     private static let playbackRateKey = "player.playbackRate"
-    private static let skipForwardKey = "player.skipForwardSeconds"
-    private static let skipBackwardKey = "player.skipBackwardSeconds"
+    private static let skipSecondsKey = "player.skipSeconds"
+    private static let volumeKey = "player.volume"
+    private static let mutedKey = "player.muted"
 
     init() {
         // 播放速率: clamp 到 slider 范围,非法值回退到 1.0
         let rate = UserDefaults.standard.object(forKey: Self.playbackRateKey) as? Float ?? 1.0
         self.playbackRate = min(max(rate, minRate), maxRate)
 
-        // 快进 / 快退跨度: 非法或越界回退到默认值
-        let fwd = UserDefaults.standard.object(forKey: Self.skipForwardKey) as? Double ?? defaultSkipSeconds
-        self.skipForwardSeconds = min(max(fwd, minSkip), maxSkip)
+        // 跨度: 非法或越界回退到默认值
+        let s = UserDefaults.standard.object(forKey: Self.skipSecondsKey) as? Double ?? defaultSkipSeconds
+        self.skipSeconds = min(max(s, minSkip), maxSkip)
 
-        let bwd = UserDefaults.standard.object(forKey: Self.skipBackwardKey) as? Double ?? defaultSkipSeconds
-        self.skipBackwardSeconds = min(max(bwd, minSkip), maxSkip)
+        // 音量: clamp 到 [0, 1],非法值回退到 1.0
+        let v = UserDefaults.standard.object(forKey: Self.volumeKey) as? Float ?? 1.0
+        self.volume = min(max(v, 0.0), 1.0)
+
+        // 静音: Bool 解读失败时回退到 false
+        self.isMuted = UserDefaults.standard.object(forKey: Self.mutedKey) as? Bool ?? false
     }
 
     deinit {
@@ -215,6 +223,10 @@ final class PlayerViewModel: ObservableObject {
         // 然后把 rate 改回 0,视频就立刻被暂停了。
         isPlaying = true
         applyRate()
+
+        // 应用持久化的音量 / 静音状态到新 player(旧 key 不迁移,个人项目懒得写)
+        newPlayer.volume = volume
+        newPlayer.isMuted = isMuted
     }
 
     /// Pause / resume toggle. Long-press state takes priority (if user is
@@ -238,20 +250,20 @@ final class PlayerViewModel: ObservableObject {
         currentTime = t.seconds
     }
 
-    // MARK: - Skip (double-tap on left/right half)
+    // MARK: - Skip (toolbar buttons + double-tap on left/right half)
 
-    /// 双击视频右半屏 → 前进 skipForwardSeconds 秒(用户可调)
+    /// 前进 skipSeconds 秒(用户可调)。被工具栏 ⏩ 按钮和视频右半屏双击共用。
     func skipForward() {
         guard duration > 0 else { return }
-        let s = skipForwardSeconds
+        let s = skipSeconds
         seek(to: currentTime + s)
         flashSkip(.forward(s))
     }
 
-    /// 双击视频左半屏 → 后退 skipBackwardSeconds 秒(用户可调)
+    /// 后退 skipSeconds 秒(用户可调)。被工具栏 ⏪ 按钮和视频左半屏双击共用。
     func skipBackward() {
         guard duration > 0 else { return }
-        let s = skipBackwardSeconds
+        let s = skipSeconds
         seek(to: currentTime - s)
         flashSkip(.backward(s))
     }
@@ -337,20 +349,32 @@ final class PlayerViewModel: ObservableObject {
         }
     }
 
-    /// 设置双击右半屏的快进跨度(秒,1 ~ 30, step 1)。持久化。
-    func setSkipForward(_ seconds: Double) {
+    /// 设置前进 / 后退 / 双击视频左右半屏的跨度(秒,1 ~ 30, step 1)。
+    /// 前进后退共用一个数值。持久化。
+    func setSkipSeconds(_ seconds: Double) {
         let s = min(max(seconds, minSkip), maxSkip)
-        guard abs(s - skipForwardSeconds) > 0.001 else { return }
-        skipForwardSeconds = s
-        UserDefaults.standard.set(s, forKey: Self.skipForwardKey)
+        guard abs(s - skipSeconds) > 0.001 else { return }
+        skipSeconds = s
+        UserDefaults.standard.set(s, forKey: Self.skipSecondsKey)
     }
 
-    /// 设置双击左半屏的快退跨度(秒,1 ~ 30, step 1)。持久化。
-    func setSkipBackward(_ seconds: Double) {
-        let s = min(max(seconds, minSkip), maxSkip)
-        guard abs(s - skipBackwardSeconds) > 0.001 else { return }
-        skipBackwardSeconds = s
-        UserDefaults.standard.set(s, forKey: Self.skipBackwardKey)
+    /// 设置播放音量(0.0 ~ 1.0)。持久化,立即应用到当前 player。
+    /// 拖动 slider 不会自动取消静音 —— 跟 macOS QuickTime / IINA 行为一致。
+    func setVolume(_ v: Float) {
+        let clamped = min(max(v, 0.0), 1.0)
+        guard abs(clamped - volume) > 0.001 else { return }
+        volume = clamped
+        UserDefaults.standard.set(clamped, forKey: Self.volumeKey)
+        player?.volume = clamped
+    }
+
+    /// 设置静音状态。持久化,立即应用到当前 player。
+    /// 不修改 volume —— 取消静音后回到之前的音量。
+    func setMuted(_ m: Bool) {
+        guard m != isMuted else { return }
+        isMuted = m
+        UserDefaults.standard.set(m, forKey: Self.mutedKey)
+        player?.isMuted = m
     }
 
     // MARK: - Header parsing
