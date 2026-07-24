@@ -31,6 +31,12 @@ struct WebBrowserView: NSViewRepresentable {
         cfg.userContentController = ctrl
 
         let wv = WKWebView(frame: .zero, configuration: cfg)
+        // Honour the iPad UA toggle. `customUserAgent = nil` restores the
+        // default macOS Safari UA; an iPad string gets sites to serve the
+        // tablet HTML5 player (often where the m3u8 is easiest to grab).
+        // Runtime toggles go through BrowserViewModel.setUseIPadUA() which
+        // updates this property + reloads the current page.
+        wv.customUserAgent = vm.useIPadUA ? BrowserViewModel.iPadUserAgent : nil
         wv.navigationDelegate = context.coordinator
         wv.uiDelegate = context.coordinator
         wv.allowsBackForwardNavigationGestures = true

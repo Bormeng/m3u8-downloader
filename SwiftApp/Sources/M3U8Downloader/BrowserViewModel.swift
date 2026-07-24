@@ -11,8 +11,24 @@ final class BrowserViewModel: ObservableObject {
         static let saveDir        = "m3u8dl.saveDir"
         static let saveNamePrefix = "m3u8dl.saveNamePrefix"
         static let headers        = "m3u8dl.headers"
+        static let useIPadUA      = "m3u8dl.useIPadUA"
     }
     private static let defaults = UserDefaults.standard
+
+    /// Standard iPad Safari 17 User-Agent string. Many sites (especially video
+    /// platforms) serve a simpler HTML5 player on the iPad layout than on the
+    /// desktop one — the m3u8 source is often easier to discover on the mobile
+    /// tier, both for our JSExtractor and for site-side 403/UA-gating logic.
+    ///
+    /// Note: iPadOS 13+ on real iPads sometimes spoofs "Macintosh" in the UA
+    /// to dodge desktop-mode websites. WKWebView on macOS does NOT apply that
+    /// spoofing — whatever string we hand it via `customUserAgent` is what
+    /// the server sees — so a plain "iPad; CPU OS 17_0 like Mac OS X" line
+    /// reliably triggers the iPad code path on most CDNs.
+    static let iPadUserAgent: String =
+        "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) "
+        + "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+        + "Version/17.0 Mobile/15E148 Safari/604.1"
 
     /// Multi-line input for *direct* m3u8 URLs only — paste a list of `.m3u8`
     /// links here to probe them straight away, without going through the
@@ -72,6 +88,19 @@ final class BrowserViewModel: ObservableObject {
     @Published var isBrowserLoading: Bool = false
     @Published var browserCanGoBack: Bool = false
     @Published var browserCanGoForward: Bool = false
+
+    /// When true the embedded WKWebView sends `BrowserViewModel.iPadUserAgent`
+    /// as its User-Agent instead of the default macOS Safari string. Persisted
+    /// across launches so the user doesn't have to flip it back on every open.
+    @Published var useIPadUA: Bool = {
+        if defaults.object(forKey: DefaultsKey.useIPadUA) == nil { return false }
+        return defaults.bool(forKey: DefaultsKey.useIPadUA)
+    }() {
+        didSet {
+            guard useIPadUA != oldValue else { return }
+            Self.defaults.set(useIPadUA, forKey: DefaultsKey.useIPadUA)
+        }
+    }
 
     /// Owned by the NSViewRepresentable; we just hold a weak ref to drive it.
     weak var webView: WKWebView?
@@ -161,6 +190,20 @@ final class BrowserViewModel: ObservableObject {
     func browserGoForward() { webView?.goForward() }
     func browserReload()    { webView?.reload() }
     func browserStop()      { webView?.stopLoading() }
+
+    /// Flip the iPad User-Agent mode and, if a page is currently loaded,
+    /// reload it so the new UA goes out on the next request. Setting
+    /// `customUserAgent` on an existing WKWebView affects subsequent loads
+    /// only — the in-flight page still carries the old UA — so a reload
+    /// is the simplest way to make the change visible to the user.
+    /// No-op when the value already matches.
+    func setUseIPadUA(_ enabled: Bool) {
+        guard enabled != useIPadUA else { return }
+        useIPadUA = enabled
+        guard let wv = webView, wv.url != nil else { return }
+        wv.customUserAgent = enabled ? Self.iPadUserAgent : nil
+        wv.reload()
+    }
 
     /// Handle a set of m3u8 URLs discovered by the embedded browser.
     /// - If the loaded page is itself an .m3u8, it's added directly.

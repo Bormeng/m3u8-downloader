@@ -99,6 +99,24 @@ struct BrowserView: View {
                 if vm.isBrowserLoading {
                     ProgressView().controlSize(.small)
                 }
+
+                // ── iPad UA toggle ──────────────────────────────────────
+                // Many sites serve a simpler HTML5 player on the iPad layout,
+                // and the m3u8 source is often easier to discover there both
+                // for our JSExtractor and for site-side UA gating. Click to
+                // flip; the page reloads under the new UA. State persists
+                // across launches via BrowserViewModel.useIPadUA.
+                Button {
+                    vm.setUseIPadUA(!vm.useIPadUA)
+                } label: {
+                    Image(systemName: vm.useIPadUA ? "ipad" : "desktopcomputer")
+                        .foregroundStyle(vm.useIPadUA ? Color.accentColor : .secondary)
+                        .imageScale(.medium)
+                }
+                .buttonStyle(.plain)
+                .help(vm.useIPadUA
+                      ? "当前:iPad UA(点击切回桌面)"
+                      : "当前:桌面 UA(点击切到 iPad)")
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)

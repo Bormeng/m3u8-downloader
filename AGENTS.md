@@ -48,3 +48,7 @@
 - 只处理 m3u8,MP4 等其它格式不在范围内
 - 下载链路**默认走 N_m3u8DL-RE**(用户偏好,因为快且能 master-playlist 选轨),
   通过 PTY 包装保证 Spectre.Console 不 race。ffmpeg 是兜底,不是默认
+- 内嵌浏览器支持 iPad UA(`BrowserViewModel.useIPadUA` + 导航栏右侧
+  `ipad` / `desktopcomputer` 图标按钮);切完会自动 reload 当前页,
+  持久化。理由:很多视频站点桌面版 player 更复杂、m3u8 难抓,iPad 版
+  HTML5 player 通常更直白
