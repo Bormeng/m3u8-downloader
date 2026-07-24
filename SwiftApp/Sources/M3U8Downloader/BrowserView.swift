@@ -95,6 +95,17 @@ struct BrowserView: View {
                         vm.browserLoad(vm.browserURL)
                     }
                     .disableAutocorrection(true)
+                    // Two guards so the URL field is never squeezed to 0 width
+                    // when the left pane is narrow:
+                    //   - layoutPriority(1) wins the HStack's available-width
+                    //     bidding over the back/forward/reload/stop buttons
+                    //     (they have no explicit width and would otherwise
+                    //     crowd the TextField out)
+                    //   - minWidth: 120 keeps the field usable even if the
+                    //     pane is dragged down close to its minWidth (460pt);
+                    //     at that point the buttons get clipped instead
+                    .layoutPriority(1)
+                    .frame(minWidth: 120)
 
                 if vm.isBrowserLoading {
                     ProgressView().controlSize(.small)
@@ -173,9 +184,19 @@ struct BrowserView: View {
 
     private var resultsPane: some View {
         VStack(spacing: 0) {
-            // ── Top: input controls (paste m3u8 + HTTP headers) ──
-            inputControlsPanel
-                .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
+            // ── Top: input controls (paste m3u8 + 浏览器设置) ──
+            // Capped at 360pt and wrapped in a ScrollView so the panel
+            // scrolls internally when the window is short, instead of the
+            // upper content being squeezed/clipped by the `emptyState`
+            // below (which declares maxHeight: .infinity and can otherwise
+            // push the top of the inputControlsPanel out of view — that's
+            // the "直接粘贴 m3u8 链接" DisclosureGroup disappearing when
+            // the app is shrunk).
+            ScrollView {
+                inputControlsPanel
+            }
+            .frame(maxHeight: 360)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
 
             Divider()
 
