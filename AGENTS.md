@@ -11,6 +11,13 @@
   /Users/ming/Documents/Repositories/m3u8-downloader/bin/deploy_app.sh
   ```
   脚本会自动跑 `package_app.sh`(重编译 + 拼 .app bundle + ad-hoc 签名)+ 部署。
+- **项目路径移动过(从 `~/.minimax-agent-cn/projects/...` 迁到现在位置)后
+  SwiftPM 的 `SwiftApp/.build/` 缓存里 PCH 还指旧路径,首次 `swift build`
+  会报 `PCH was compiled with module cache path '...旧路径...'`。直接
+  `rm -rf SwiftApp/.build` 然后重跑 `bin/deploy_app.sh` 即可。
+  `bin/build_icns.py` 被 touch 后,`build/AppIcon.icns` 也会被脚本判定为
+  "需重 build" → 走 Python venv 那条路。如果图标源 PNG 没动,直接
+  `touch build/AppIcon.icns` 让缓存比脚本新就行,免去重建 venv。
 - **部署时不要在 `/Applications/` 留旧版本备份** —— `deploy_app.sh` 已经去掉 stash
   步骤,直接 `rm -rf` + `cp -R` 覆盖。版本回滚靠项目内的 `git`,不需要 OS 层备份目录。
 - **N_m3u8DL-RE 在 macOS 上以前会崩溃**(Spectre.Console progress bar 的 race condition,
