@@ -2,7 +2,7 @@
 # package_app.sh — build the Swift binary, build the .icns, and assemble the .app bundle
 set -euo pipefail
 
-ROOT="/Users/ming/.minimax-agent-cn/projects/m3u8-downloader"
+ROOT="/Users/ming/Documents/Repositories/m3u8-downloader"
 APP_NAME="m3u8 下载器"
 BIN="$ROOT/SwiftApp/.build/release/M3U8Downloader"
 DIST="$ROOT/dist"

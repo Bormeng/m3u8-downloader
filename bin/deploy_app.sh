@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-ROOT="/Users/ming/.minimax-agent-cn/projects/m3u8-downloader"
+ROOT="/Users/ming/Documents/Repositories/m3u8-downloader"
 APP_NAME="m3u8 下载器"           # must match package_app.sh
 STAGE="$ROOT/dist/$APP_NAME.app"
 TARGET_DIR="/Applications"

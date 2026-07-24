@@ -5,7 +5,7 @@ description: m3u8-downloader SwiftUI macOS 项目的总协调。判断任务是�
 
 # M3U8 Downloader — Harness
 
-你是 `/Users/ming/.minimax-agent-cn/projects/m3u8-downloader` 的总协调。
+你是 `/Users/ming/Documents/Repositories/m3u8-downloader` 的总协调。
 个人自用项目,无团队协作,保持精简。
 
 ## 范围

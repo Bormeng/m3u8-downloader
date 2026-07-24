@@ -31,7 +31,7 @@ m3u8-downloader/
 
 ```bash
 # 直接跑
-open /Users/ming/.minimax-agent-cn/projects/m3u8-downloader/dist/m3u8\ 下载器.app
+open /Users/ming/Documents/Repositories/m3u8-downloader/dist/m3u8\ 下载器.app
 
 # 或一键部署到 /Applications
 bin/deploy_app.sh

@@ -12,8 +12,8 @@ import sys
 from pathlib import Path
 from PIL import Image
 
-SRC = Path("/Users/ming/.minimax-agent-cn/projects/m3u8-downloader/docs/icon_candidate_1_geometric.png")
-DEFAULT_ICONSET = Path("/Users/ming/.minimax-agent-cn/projects/m3u8-downloader/build/AppIcon.iconset")
+SRC = Path("/Users/ming/Documents/Repositories/m3u8-downloader/docs/icon_candidate_1_geometric.png")
+DEFAULT_ICONSET = Path("/Users/ming/Documents/Repositories/m3u8-downloader/build/AppIcon.iconset")
 ICONSET = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_ICONSET
 
 # Pixels whose R,G,B are all above this threshold are treated as "white background"
