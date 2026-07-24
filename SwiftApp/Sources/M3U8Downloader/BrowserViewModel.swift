@@ -92,8 +92,14 @@ final class BrowserViewModel: ObservableObject {
     /// When true the embedded WKWebView sends `BrowserViewModel.iPadUserAgent`
     /// as its User-Agent instead of the default macOS Safari string. Persisted
     /// across launches so the user doesn't have to flip it back on every open.
+    ///
+    /// Default is `true` (iPad UA): the user explicitly prefers the iPad
+    /// layout because many video sites serve a simpler HTML5 player on the
+    /// tablet tier, with the m3u8 source more exposed to JSExtractor. Only
+    /// applies when the key is missing in UserDefaults — users who have
+    /// already toggled to desktop keep their stored `false` value.
     @Published var useIPadUA: Bool = {
-        if defaults.object(forKey: DefaultsKey.useIPadUA) == nil { return false }
+        if defaults.object(forKey: DefaultsKey.useIPadUA) == nil { return true }
         return defaults.bool(forKey: DefaultsKey.useIPadUA)
     }() {
         didSet {
